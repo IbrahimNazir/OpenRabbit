@@ -108,15 +108,24 @@ def _handle_installation_event(payload: dict, action: str) -> None:
                 "repo_count": len(repos),
             },
         )
-        # TODO (Day 4): Create Installation + Repository DB records,
-        #               enqueue index_repository task for each repo.
+        from app.core.installation_service import handle_installation_created
+
+        try:
+            handle_installation_created(payload)
+        except Exception:
+            logger.exception("Failed to process installation created event")
 
     elif action == "deleted":
         logger.info(
             "Installation deleted",
             extra={"installation_id": installation_id, "account": account},
         )
-        # TODO (Day 4): Mark Installation as inactive.
+        from app.core.installation_service import handle_installation_deleted
+
+        try:
+            handle_installation_deleted(payload)
+        except Exception:
+            logger.exception("Failed to process installation deleted event")
 
     elif action in ("added", "removed"):
         repos_added = payload.get("repositories_added", [])
@@ -129,6 +138,15 @@ def _handle_installation_event(payload: dict, action: str) -> None:
                 "removed": len(repos_removed),
             },
         )
+        from app.core.installation_service import handle_repos_added, handle_repos_removed
+
+        try:
+            if repos_added:
+                handle_repos_added(payload)
+            if repos_removed:
+                handle_repos_removed(payload)
+        except Exception:
+            logger.exception("Failed to process repo change event")
 
     else:
         logger.debug("Installation event no-op", extra={"action": action})
@@ -150,6 +168,7 @@ def _handle_pull_request_event(payload: dict, action: str) -> None:
     head_sha: str = pr.get("head", {}).get("sha", "")
     base_sha: str = pr.get("base", {}).get("sha", "")
     pr_title: str = pr.get("title", "")
+    pr_description: str = pr.get("body", "") or ""
     author: str = pr.get("user", {}).get("login", "")
 
     logger.info(
@@ -166,11 +185,43 @@ def _handle_pull_request_event(payload: dict, action: str) -> None:
         },
     )
 
-    # TODO (Day 3): Dispatch Celery task:
-    # run_pr_review.apply_async(
-    #     args=[installation_id, repo_full_name, repo_id, pr_number, head_sha, base_sha],
-    #     queue="fast_lane",
-    # )
+    # Run the gatekeeper filter
+    from app.core.filter_engine import FilterEngine
+
+    filter_engine = FilterEngine()
+    filter_result = filter_engine.should_review(payload)
+
+    if not filter_result.should_process:
+        logger.info(
+            "PR filtered out — skipping review",
+            extra={"reason": filter_result.reason, "queue": filter_result.queue},
+        )
+        return
+
+    # Dispatch Celery task to the appropriate queue
+    from app.tasks.review_task import run_pr_review
+
+    run_pr_review.apply_async(
+        args=[
+            installation_id,
+            repo_full_name,
+            repo_id,
+            pr_number,
+            head_sha,
+            base_sha,
+            pr_title,
+            pr_description,
+        ],
+        queue=filter_result.queue,
+    )
+    logger.info(
+        "Review task dispatched",
+        extra={
+            "repo": repo_full_name,
+            "pr_number": pr_number,
+            "queue": filter_result.queue,
+        },
+    )
 
 
 def _handle_review_comment_event(payload: dict, action: str) -> None:
