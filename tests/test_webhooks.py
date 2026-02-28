@@ -18,9 +18,10 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
 from app.main import app
+from app.config import get_settings
 
 # Test secret — used in all HMAC tests.
 TEST_SECRET = "test_webhook_secret_1234567890abcdef"
@@ -28,23 +29,22 @@ TEST_SECRET = "test_webhook_secret_1234567890abcdef"
 
 @pytest.fixture(autouse=True)
 def _override_settings() -> None:
-    """Patch get_settings to return a mock with the test webhook secret.
-
-    This avoids the issue where pydantic-settings reads the .env file
-    and overrides monkeypatch.setenv values.
-    """
+    """Override get_settings dependency for all tests."""
     mock_settings = MagicMock()
     mock_settings.github_webhook_secret = TEST_SECRET
     mock_settings.log_level = "INFO"
+    # Note: github_private_key is a property, mocking it on the instance:
+    type(mock_settings).github_private_key = "test_key"
 
-    with patch("app.api.webhooks.get_settings", return_value=mock_settings):
-        yield
+    app.dependency_overrides[get_settings] = lambda: mock_settings
+    yield
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture()
 def client() -> TestClient:
     """Create a FastAPI TestClient."""
-    return TestClient(app, raise_server_exceptions=False)
+    return TestClient(app, raise_server_exceptions=True)
 
 
 def _sign_payload(payload: bytes, secret: str = TEST_SECRET) -> str:

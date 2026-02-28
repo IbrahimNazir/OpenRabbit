@@ -22,6 +22,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # --- GitHub App ---
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     # --- Application ---
     log_level: str = "INFO"
     admin_secret: str = ""
+    smee_url: str = ""
 
     @property
     def github_private_key(self) -> str:
