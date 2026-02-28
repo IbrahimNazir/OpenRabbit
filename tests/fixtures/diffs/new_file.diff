@@ -1,0 +1,21 @@
+diff --git a/app/new_module.py b/app/new_module.py
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/app/new_module.py
+@@ -0,0 +1,15 @@
++"""A brand new module."""
++
++from __future__ import annotations
++
++import logging
++
++logger = logging.getLogger(__name__)
++
++
++def hello(name: str) -> str:
++    """Greet someone by name."""
++    logger.info("Greeting %s", name)
++    return f"Hello, {name}!"
++
++

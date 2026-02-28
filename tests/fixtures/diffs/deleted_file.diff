@@ -1,0 +1,16 @@
+diff --git a/app/old_module.py b/app/old_module.py
+deleted file mode 100644
+index abc1234..0000000
+--- a/app/old_module.py
++++ /dev/null
+@@ -1,10 +0,0 @@
+-"""This module is being removed."""
+-
+-
+-def deprecated_function():
+-    """Does nothing useful anymore."""
+-    pass
+-
+-
+-def another_old_function():
+-    return 42

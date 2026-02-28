@@ -1,0 +1,45 @@
+diff --git a/app/main.py b/app/main.py
+index aaa1111..bbb2222 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,3 +1,4 @@
++"""Main application module."""
+ import os
+ import sys
+ 
+diff --git a/app/config.py b/app/config.py
+index ccc3333..ddd4444 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -10,7 +10,7 @@ class Settings:
+     db_url: str = "sqlite:///db.sqlite"
+ 
+     def validate(self):
+-        if not self.db_url:
++        if not self.db_url or self.db_url == "":
+             raise ValueError("db_url is required")
+ 
+diff --git a/app/models.py b/app/models.py
+new file mode 100644
+index 0000000..eee5555
+--- /dev/null
++++ b/app/models.py
+@@ -0,0 +1,5 @@
++"""Database models."""
++
++
++class User:
++    pass
+diff --git a/tests/test_config.py b/tests/test_config.py
+index fff6666..ggg7777 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -5,3 +5,8 @@ def test_default_settings():
+     settings = Settings()
+     assert settings.db_url == "sqlite:///db.sqlite"
+ 
++
++def test_validate_empty():
++    settings = Settings(db_url="")
++    with pytest.raises(ValueError):
++        settings.validate()

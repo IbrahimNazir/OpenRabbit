@@ -1,0 +1,144 @@
+# =============================================================================
+# OpenRabbit — Docker Compose (Development + Self-Host)
+#
+# Usage:
+#   docker compose up -d                    # Start infra services
+#   docker compose --profile dev up -d      # Start infra + smee relay
+#
+# Per ADR-0008: application code runs natively on the host during dev.
+# =============================================================================
+
+name: openrabbit
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openrabbit
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+      POSTGRES_DB: openrabbit
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openrabbit"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - openrabbit_net
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - openrabbit_net
+
+  # ---------------------------------------------------------------------------
+  # Qdrant (Vector DB)
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - openrabbit_net
+
+  # ---------------------------------------------------------------------------
+  # Smee.io relay (local development webhook forwarding)
+  # Only started with: docker compose --profile dev up
+  # ---------------------------------------------------------------------------
+  smee:
+    image: node:18-alpine
+    restart: unless-stopped
+    command: >
+      sh -c "npm install -g smee-client &&
+             smee --url ${SMEE_URL} --target http://host.docker.internal:8000/api/webhooks/github"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux compatibility
+    profiles:
+      - dev
+    networks:
+      - openrabbit_net
+
+  # ---------------------------------------------------------------------------
+  # Production application services (uncomment for full Docker deployment)
+  # ---------------------------------------------------------------------------
+  # api:
+  #   build: .
+  #   command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+  #   ports:
+  #     - "8000:8000"
+  #   env_file: .env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - openrabbit_net
+  #
+  # worker_fast:
+  #   build: .
+  #   command: celery -A app.tasks.celery_app worker -Q fast_lane --concurrency=4 --loglevel=info
+  #   env_file: .env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - openrabbit_net
+  #
+  # worker_slow:
+  #   build: .
+  #   command: celery -A app.tasks.celery_app worker -Q slow_lane --concurrency=1 --loglevel=info
+  #   env_file: .env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - openrabbit_net
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+
+networks:
+  openrabbit_net:
+    driver: bridge

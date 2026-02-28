@@ -1,0 +1,12 @@
+diff --git a/app/utils.py b/app/utils.py
+index abc1234..def5678 100644
+--- a/app/utils.py
++++ b/app/utils.py
+@@ -10,7 +10,8 @@ def process_data(items):
+     results = []
+     for item in items:
+-        if item > 0:
++        if item >= 0:
++            # Include zero values
+             results.append(item * 2)
+     return results

@@ -1,0 +1,11 @@
+diff --git a/app/auth.py b/app/auth.py
+index abc1234..def5678 100644
+--- a/app/auth.py
++++ b/app/auth.py
+@@ -15,7 +15,8 @@ def verify_token(token: str) -> bool:
+     if not token:
+         return False
+ 
+-    return token == stored_token
++    # Use constant-time comparison to prevent timing attacks
++    return hmac.compare_digest(token, stored_token)

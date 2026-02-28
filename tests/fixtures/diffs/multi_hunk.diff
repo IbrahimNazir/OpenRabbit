@@ -1,0 +1,30 @@
+diff --git a/app/service.py b/app/service.py
+index abc1234..def5678 100644
+--- a/app/service.py
++++ b/app/service.py
+@@ -5,7 +5,7 @@ class UserService:
+     def __init__(self, db):
+         self.db = db
+ 
+-    def get_user(self, user_id):
++    def get_user(self, user_id: int) -> dict:
+         """Fetch a user by ID."""
+         return self.db.query(user_id)
+ 
+@@ -25,6 +25,10 @@ class UserService:
+     def delete_user(self, user_id):
+         """Delete a user."""
+         self.db.delete(user_id)
++        logger.info("User deleted", extra={"user_id": user_id})
++
++    def list_users(self) -> list:
++        """List all users."""
+         return True
+ 
+@@ -50,4 +54,5 @@ class UserService:
+     def _validate(self, data):
+         if not data:
+             raise ValueError("Empty data")
+-        return True
++        return data
++
