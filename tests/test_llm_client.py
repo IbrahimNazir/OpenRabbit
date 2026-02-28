@@ -20,7 +20,7 @@ def mock_settings():
     """Provide mock settings with a test API key."""
     with patch("app.llm.client.get_settings") as mock:
         settings = MagicMock()
-        settings.anthropic_api_key = "test-key-123"
+        settings.deepseek_api_key = "test-key-123"
         mock.return_value = settings
         yield settings
 
@@ -37,16 +37,18 @@ def llm_client(mock_settings):
 
 
 def _make_response(text: str, input_tokens: int = 100, output_tokens: int = 50):
-    """Create a mock Anthropic response."""
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
+    """Create a mock OpenAI response."""
+    message = MagicMock()
+    message.content = text
+
+    choice = MagicMock()
+    choice.message = message
 
     response = MagicMock()
-    response.content = [block]
+    response.choices = [choice]
     response.usage = MagicMock()
-    response.usage.input_tokens = input_tokens
-    response.usage.output_tokens = output_tokens
+    response.usage.prompt_tokens = input_tokens
+    response.usage.completion_tokens = output_tokens
     return response
 
 
@@ -62,26 +64,28 @@ class TestComplete:
     async def test_successful_completion(self, llm_client):
         """LLM call returns text and cost."""
         response = _make_response("Hello, world!", input_tokens=100, output_tokens=50)
-        llm_client._client.messages = MagicMock()
-        llm_client._client.messages.create = AsyncMock(return_value=response)
+        llm_client._client.chat = MagicMock()
+        llm_client._client.chat.completions = MagicMock()
+        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
 
         text, cost = await llm_client.complete("What is Python?")
 
         assert text == "Hello, world!"
         assert cost > 0
-        llm_client._client.messages.create.assert_called_once()
+        llm_client._client.chat.completions.create.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_cost_calculation_haiku(self, llm_client):
-        """Cost is calculated correctly for Haiku model."""
+    async def test_cost_calculation(self, llm_client):
+        """Cost is calculated correctly for DeepSeek chat model."""
         response = _make_response("result", input_tokens=1000, output_tokens=500)
-        llm_client._client.messages = MagicMock()
-        llm_client._client.messages.create = AsyncMock(return_value=response)
+        llm_client._client.chat = MagicMock()
+        llm_client._client.chat.completions = MagicMock()
+        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
 
-        _, cost = await llm_client.complete("test", model="claude-haiku-4-5-20251001")
+        _, cost = await llm_client.complete("test", model="deepseek-chat")
 
-        # Haiku: $0.80/1M input, $4.00/1M output
-        expected = (1000 * 0.80 + 500 * 4.00) / 1_000_000
+        # DeepSeek Chat: $0.14/1M input, $0.28/1M output
+        expected = (1000 * 0.14 + 500 * 0.28) / 1_000_000
         assert abs(cost - expected) < 1e-8
 
 
@@ -98,8 +102,9 @@ class TestCompleteWithJson:
         """Parses clean JSON response."""
         json_str = json.dumps({"summary": "test", "risk_level": "low"})
         response = _make_response(json_str)
-        llm_client._client.messages = MagicMock()
-        llm_client._client.messages.create = AsyncMock(return_value=response)
+        llm_client._client.chat = MagicMock()
+        llm_client._client.chat.completions = MagicMock()
+        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
 
         data, cost = await llm_client.complete_with_json("Summarize this")
 
@@ -111,8 +116,9 @@ class TestCompleteWithJson:
         """Strips ```json ... ``` fences from LLM output before parsing."""
         json_str = '```json\n{"key": "value"}\n```'
         response = _make_response(json_str)
-        llm_client._client.messages = MagicMock()
-        llm_client._client.messages.create = AsyncMock(return_value=response)
+        llm_client._client.chat = MagicMock()
+        llm_client._client.chat.completions = MagicMock()
+        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
 
         data, cost = await llm_client.complete_with_json("Return JSON")
 
@@ -124,8 +130,9 @@ class TestCompleteWithJson:
         """Parses JSON array response."""
         json_str = json.dumps([{"line_start": 10, "severity": "high"}])
         response = _make_response(json_str)
-        llm_client._client.messages = MagicMock()
-        llm_client._client.messages.create = AsyncMock(return_value=response)
+        llm_client._client.chat = MagicMock()
+        llm_client._client.chat.completions = MagicMock()
+        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
 
         data, cost = await llm_client.complete_with_json("Find bugs")
 
@@ -138,15 +145,16 @@ class TestCompleteWithJson:
         bad_response = _make_response("Not valid JSON at all")
         good_response = _make_response('{"result": "ok"}')
 
-        llm_client._client.messages = MagicMock()
-        llm_client._client.messages.create = AsyncMock(
+        llm_client._client.chat = MagicMock()
+        llm_client._client.chat.completions = MagicMock()
+        llm_client._client.chat.completions.create = AsyncMock(
             side_effect=[bad_response, good_response]
         )
 
         data, cost = await llm_client.complete_with_json("Return JSON")
 
         assert data["result"] == "ok"
-        assert llm_client._client.messages.create.call_count == 2
+        assert llm_client._client.chat.completions.create.call_count == 2
 
 
 # ---------------------------------------------------------------------------

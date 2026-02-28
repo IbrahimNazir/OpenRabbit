@@ -1,4 +1,4 @@
-"""LLM client wrapping the Anthropic SDK.
+"""LLM client wrapping the OpenAI SDK (configured for DeepSeek).
 
 Implements ADR-0014: retry logic, cost tracking, JSON parsing with fallback.
 
@@ -17,24 +17,21 @@ import re
 import time
 from typing import Any
 
-import anthropic
+import openai
 
 from app.config import get_settings
 from app.core.exceptions import LLMError, LLMParseError, LLMRateLimitError
 
 logger = logging.getLogger(__name__)
 
-# Pricing per 1M tokens (input / output) — updated for current models.
+# Pricing per 1M tokens (input / output)
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "claude-haiku-4-5-20251001": (0.80, 4.00),
-    "claude-sonnet-4-5-20251001": (3.00, 15.00),
-    # Fallback / aliases
-    "claude-3-5-haiku-20241022": (0.80, 4.00),
-    "claude-3-5-sonnet-20241022": (3.00, 15.00),
+    "deepseek-chat": (0.14, 0.28),
+    "deepseek-reasoner": (0.55, 2.19),
 }
 
 # Defaults
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.2
 REQUEST_TIMEOUT = 120.0
@@ -46,12 +43,14 @@ MAX_RETRIES = 3
 
 
 class LLMClient:
-    """Async Anthropic LLM client with retry logic and cost tracking."""
+    """Async OpenAI LLM client with retry logic and cost tracking."""
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._client = anthropic.AsyncAnthropic(
-            api_key=settings.anthropic_api_key,
+        print('credemtials: ',settings.deepseek_api_key)
+        self._client = openai.AsyncOpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url="https://api.deepseek.com",
             timeout=REQUEST_TIMEOUT,
         )
 
@@ -64,32 +63,33 @@ class LLMClient:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = DEFAULT_TEMPERATURE,
     ) -> tuple[str, float]:
-        """Send a prompt to Claude and return (response_text, cost_usd).
+        """Send a prompt to DeepSeek and return (response_text, cost_usd).
 
         Retries on rate limits (429) and server errors (5xx) per ADR-0014.
         """
         start_time = time.monotonic()
         last_error: Exception | None = None
 
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
         for attempt in range(MAX_RETRIES + 1):
             try:
-                response = await self._client.messages.create(
+                response = await self._client.chat.completions.create(
                     model=model,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    system=system if system else anthropic.NOT_GIVEN,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                 )
 
                 # Extract text from response
-                text = ""
-                for block in response.content:
-                    if block.type == "text":
-                        text += block.text
+                text = response.choices[0].message.content or ""
 
                 # Calculate cost
-                input_tokens = response.usage.input_tokens
-                output_tokens = response.usage.output_tokens
+                input_tokens = response.usage.prompt_tokens if response.usage else 0
+                output_tokens = response.usage.completion_tokens if response.usage else 0
                 cost_usd = self._calculate_cost(model, input_tokens, output_tokens)
 
                 duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -107,7 +107,7 @@ class LLMClient:
 
                 return text, cost_usd
 
-            except anthropic.RateLimitError as e:
+            except openai.RateLimitError as e:
                 last_error = e
                 if attempt < MAX_RETRIES:
                     logger.warning(
@@ -121,9 +121,9 @@ class LLMClient:
                         f"Rate limit exceeded after {MAX_RETRIES + 1} attempts"
                     ) from e
 
-            except anthropic.APIStatusError as e:
+            except openai.APIStatusError as e:
                 last_error = e
-                if e.status_code >= 500 and attempt < MAX_RETRIES:
+                if e.status_code and e.status_code >= 500 and attempt < MAX_RETRIES:
                     wait = SERVER_ERROR_BACKOFF[min(attempt, len(SERVER_ERROR_BACKOFF) - 1)]
                     logger.warning(
                         "LLM server error %d — retrying in %ds",
@@ -134,10 +134,10 @@ class LLMClient:
                     await asyncio.sleep(wait)
                 else:
                     raise LLMError(
-                        f"Anthropic API error: {e.status_code} — {e.message}"
+                        f"OpenAI API error: {e.status_code} — {e.message}"
                     ) from e
 
-            except anthropic.APIConnectionError as e:
+            except openai.APIConnectionError as e:
                 last_error = e
                 if attempt < MAX_RETRIES:
                     wait = SERVER_ERROR_BACKOFF[min(attempt, len(SERVER_ERROR_BACKOFF) - 1)]
@@ -206,7 +206,7 @@ class LLMClient:
     @staticmethod
     def _calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
         """Calculate USD cost from token usage."""
-        input_price, output_price = MODEL_PRICING.get(model, (3.00, 15.00))
+        input_price, output_price = MODEL_PRICING.get(model, (0.14, 0.28))
         return (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
     @staticmethod

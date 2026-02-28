@@ -52,9 +52,10 @@ class GitHubClient:
     CACHE_KEY_PREFIX = "github:token:"
     TOKEN_TTL_SECONDS = 55 * 60  # 55 minutes
 
-    def __init__(self, installation_id: int, redis: Any) -> None:
+    def __init__(self, installation_id: int, redis: Any, client: httpx.AsyncClient | None = None) -> None:
         self.installation_id = installation_id
         self.redis = redis
+        self.client = client or httpx.AsyncClient(timeout=30.0)
 
     # ------------------------------------------------------------------
     #  Authentication
@@ -104,35 +105,35 @@ class GitHubClient:
         """Exchange App JWT for an installation-scoped access token."""
         app_jwt = self._generate_app_jwt()
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{GITHUB_API_BASE}/app/installations/{self.installation_id}/access_tokens",
-                headers={
-                    "Authorization": f"Bearer {app_jwt}",
-                    **_BASE_HEADERS,
-                },
+        response = await self.client.post(
+            f"{GITHUB_API_BASE}/app/installations/{self.installation_id}/access_tokens",
+            headers={
+                "Authorization": f"Bearer {app_jwt}",
+                **_BASE_HEADERS,
+            },
+            timeout=10.0,
+        )
+
+        if response.status_code == 401:
+            raise GitHubAuthError(
+                "App JWT is invalid — check GITHUB_APP_PRIVATE_KEY_PATH and GITHUB_APP_ID"
+            )
+        if response.status_code == 404:
+            raise GitHubInstallationNotFoundError(
+                f"Installation {self.installation_id} not found — may have been uninstalled"
+            )
+        if response.status_code >= 400:
+            raise GitHubAPIError(
+                f"Failed to get installation token: {response.text}",
+                status_code=response.status_code,
             )
 
-            if response.status_code == 401:
-                raise GitHubAuthError(
-                    "App JWT is invalid — check GITHUB_APP_PRIVATE_KEY_PATH and GITHUB_APP_ID"
-                )
-            if response.status_code == 404:
-                raise GitHubInstallationNotFoundError(
-                    f"Installation {self.installation_id} not found — may have been uninstalled"
-                )
-            if response.status_code >= 400:
-                raise GitHubAPIError(
-                    f"Failed to get installation token: {response.text}",
-                    status_code=response.status_code,
-                )
-
-            data: dict = response.json()
-            logger.info(
-                "Fresh installation token obtained",
-                extra={"installation_id": self.installation_id},
-            )
-            return data["token"]
+        data: dict = response.json()
+        logger.info(
+            "Fresh installation token obtained",
+            extra={"installation_id": self.installation_id},
+        )
+        return data["token"]
 
     async def _invalidate_token(self) -> None:
         """Force token refresh on next request (e.g., after 403 from GitHub API)."""
@@ -165,42 +166,41 @@ class GitHubClient:
         if headers:
             request_headers.update(headers)
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.request(
+        response = await self.client.request(
+            method,
+            url,
+            headers=request_headers,
+            json=json_body,
+        )
+
+        # Check rate limits on every response.
+        await self._check_rate_limit(response)
+
+        # Handle 403: token may be revoked — invalidate cache and retry once.
+        if response.status_code == 403:
+            remaining = response.headers.get("X-RateLimit-Remaining", "unknown")
+            if remaining == "0":
+                reset_at = response.headers.get("X-RateLimit-Reset", "")
+                raise GitHubRateLimitError(
+                    f"Rate limit exceeded. Resets at: {reset_at}",
+                    reset_at=reset_at,
+                )
+            # Token revoked — invalidate and retry.
+            logger.warning(
+                "GitHub 403 — invalidating cached token and retrying",
+                extra={"installation_id": self.installation_id},
+            )
+            await self._invalidate_token()
+            token = await self.get_access_token()
+            request_headers["Authorization"] = f"Bearer {token}"
+            response = await self.client.request(
                 method,
                 url,
                 headers=request_headers,
                 json=json_body,
             )
 
-            # Check rate limits on every response.
-            await self._check_rate_limit(response)
-
-            # Handle 403: token may be revoked — invalidate cache and retry once.
-            if response.status_code == 403:
-                remaining = response.headers.get("X-RateLimit-Remaining", "unknown")
-                if remaining == "0":
-                    reset_at = response.headers.get("X-RateLimit-Reset", "")
-                    raise GitHubRateLimitError(
-                        f"Rate limit exceeded. Resets at: {reset_at}",
-                        reset_at=reset_at,
-                    )
-                # Token revoked — invalidate and retry.
-                logger.warning(
-                    "GitHub 403 — invalidating cached token and retrying",
-                    extra={"installation_id": self.installation_id},
-                )
-                await self._invalidate_token()
-                token = await self.get_access_token()
-                request_headers["Authorization"] = f"Bearer {token}"
-                response = await client.request(
-                    method,
-                    url,
-                    headers=request_headers,
-                    json=json_body,
-                )
-
-            return response
+        return response
 
     async def _check_rate_limit(self, response: httpx.Response) -> None:
         """Log rate limit status from every GitHub API response."""
@@ -367,3 +367,7 @@ class GitHubClient:
         response.raise_for_status()
 
         return response.json()
+
+    async def aclose(self) -> None:
+        """Close the underlying HTTPX client."""
+        await self.client.aclose()

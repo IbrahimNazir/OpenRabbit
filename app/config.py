@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # --- AI / LLM ---
     anthropic_api_key: str = ""
+    deepseek_api_key: str = ""
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://openrabbit:devpassword@localhost:5432/openrabbit"

@@ -28,6 +28,7 @@ def _create_celery_app() -> Celery:
         "openrabbit",
         broker=settings.redis_url,
         backend=settings.redis_url,
+        include=["app.tasks.review_task"],
     )
 
     app.conf.update(
@@ -63,8 +64,6 @@ def _create_celery_app() -> Celery:
         enable_utc=True,
     )
 
-    # Auto-discover tasks in app.tasks package
-    app.autodiscover_tasks(["app.tasks"])
 
     return app
 

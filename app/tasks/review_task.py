@@ -78,8 +78,14 @@ def run_pr_review(
             base_sha=base_sha,
         )
 
-        # Run the async pipeline in a new event loop
-        result = asyncio.run(
+        # Run the async pipeline in a safe event loop for Celery
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        result = loop.run_until_complete(
             _run_async_pipeline(
                 installation_id=installation_id,
                 repo_full_name=repo_full_name,
@@ -129,7 +135,12 @@ def run_pr_review(
 
         # Post error comment on the PR
         try:
-            asyncio.run(
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(
                 _post_error_comment(installation_id, repo_full_name, pr_number)
             )
         except Exception:
@@ -147,7 +158,12 @@ def run_pr_review(
             _update_review_record(review_id, status="failed", error_message=str(exc))
 
         try:
-            asyncio.run(
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(
                 _post_error_comment(installation_id, repo_full_name, pr_number)
             )
         except Exception:
@@ -256,6 +272,7 @@ async def _run_async_pipeline(
         }
 
     finally:
+        await github.aclose()
         await redis_client.close()
 
 
@@ -286,6 +303,7 @@ async def _post_error_comment(
             ),
         )
     finally:
+        await github.aclose()
         await redis_client.close()
 
 
