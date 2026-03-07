@@ -83,6 +83,32 @@ def handle_installation_created(payload: dict) -> None:
             extra={"installation_id": installation_id},
         )
 
+        # Dispatch indexing tasks — never roll back the DB commit on failure
+        try:
+            from app.tasks.index_task import index_repository_task
+
+            for repo_data in repos:
+                index_repository_task.apply_async(
+                    args=[
+                        installation_id,
+                        repo_data.get("full_name", ""),
+                        repo_data.get("id", 0),
+                    ],
+                    queue="default",
+                )
+                logger.info(
+                    "Dispatched index task for repo",
+                    extra={
+                        "repo": repo_data.get("full_name", ""),
+                        "installation_id": installation_id,
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch indexing tasks — DB records are safe",
+                extra={"installation_id": installation_id},
+            )
+
     except Exception:
         session.rollback()
         logger.exception(
@@ -167,6 +193,32 @@ def handle_repos_added(payload: dict) -> None:
             len(repos_added),
             extra={"installation_id": installation_id},
         )
+
+        # Dispatch indexing tasks — never roll back the DB commit on failure
+        try:
+            from app.tasks.index_task import index_repository_task
+
+            for repo_data in repos_added:
+                index_repository_task.apply_async(
+                    args=[
+                        installation_id,
+                        repo_data.get("full_name", ""),
+                        repo_data.get("id", 0),
+                    ],
+                    queue="default",
+                )
+                logger.info(
+                    "Dispatched index task for added repo",
+                    extra={
+                        "repo": repo_data.get("full_name", ""),
+                        "installation_id": installation_id,
+                    },
+                )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch indexing tasks for added repos — DB records are safe",
+                extra={"installation_id": installation_id},
+            )
 
     except Exception:
         session.rollback()

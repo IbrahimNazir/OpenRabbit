@@ -28,7 +28,11 @@ def _create_celery_app() -> Celery:
         "openrabbit",
         broker=settings.redis_url,
         backend=settings.redis_url,
-        include=["app.tasks.review_task"],
+        include=[
+            "app.tasks.review_task",
+            "app.tasks.index_task",
+            "app.tasks.conversation_task",
+        ],
     )
 
     app.conf.update(
@@ -48,6 +52,7 @@ def _create_celery_app() -> Celery:
         # Queue routing
         task_default_queue="fast_lane",
         task_queues={
+            "default": {"exchange": "default", "routing_key": "default"},
             "fast_lane": {"exchange": "fast_lane", "routing_key": "fast_lane"},
             "slow_lane": {"exchange": "slow_lane", "routing_key": "slow_lane"},
         },

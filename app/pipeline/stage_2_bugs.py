@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from app.core.comment_formatter import Finding
 from app.core.diff_parser import FileDiff, build_line_to_position_map
 from app.llm.ast_validator import INVALID_SUGGESTION_NOTE, validate_suggestion
-from app.llm.prompts import PROMPT_BUG_DETECTION, SYSTEM_REVIEWER
+from app.llm.prompts import PROMPT_BUG_DETECTION, SYSTEM_BUG_REVIEWER
 from app.pipeline.stage_0_linters import LinterFinding
 
 if TYPE_CHECKING:
@@ -300,7 +300,7 @@ async def _analyze_file_level(
 
             data, cost = await ctx.llm.complete_with_json(
                 prompt,
-                system=SYSTEM_REVIEWER,
+                system=SYSTEM_BUG_REVIEWER,
             )
 
             position_map = build_line_to_position_map(file_diff)
@@ -376,7 +376,7 @@ async def _analyze_hunk_level(
 
             data, cost = await ctx.llm.complete_with_json(
                 prompt,
-                system=SYSTEM_REVIEWER,
+                system=SYSTEM_BUG_REVIEWER,
             )
 
             position_map = build_line_to_position_map(file_diff)

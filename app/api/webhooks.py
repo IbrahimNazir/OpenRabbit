@@ -73,6 +73,10 @@ async def receive_github_webhook(
     if x_github_event == "installation":
         _handle_installation_event(payload, action)
 
+    elif x_github_event == "installation_repositories":
+        # GitHub sends repo add/remove as a separate event type
+        _handle_installation_event(payload, action)
+
     elif x_github_event == "pull_request":
         _handle_pull_request_event(payload, action)
 
@@ -161,8 +165,7 @@ def _handle_pull_request_event(payload: dict, action: str) -> None:
         return
 
     pr = payload.get("pull_request", {})
-    # Use the correct installation ID (webhook payload has wrong ID: 2967947)
-    installation_id: int = 113171699  # Hardcoded correct installation ID
+    installation_id: int = payload.get("installation", {}).get("id", 0)
     repo_full_name: str = payload.get("repository", {}).get("full_name", "")
     repo_id: int = payload.get("repository", {}).get("id", 0)
     pr_number: int = pr.get("number", 0)
@@ -177,7 +180,6 @@ def _handle_pull_request_event(payload: dict, action: str) -> None:
         extra={
             "action": action,
             "installation_id": installation_id,
-            "webhook_installation_id": payload.get("installation", {}).get("id", 0),  # Log the wrong one
             "repo": repo_full_name,
             "pr_number": pr_number,
             "pr_title": pr_title,
@@ -239,6 +241,15 @@ def _handle_review_comment_event(payload: dict, action: str) -> None:
     pr_number: int = payload.get("pull_request", {}).get("number", 0)
     repo_full_name: str = payload.get("repository", {}).get("full_name", "")
 
+    # Skip comments authored by our own bot to prevent feedback loops
+    comment_author: str = comment.get("user", {}).get("login", "")
+    if comment_author.endswith("[bot]"):
+        logger.debug(
+            "Ignoring bot-authored comment",
+            extra={"author": comment_author, "comment_id": comment_id},
+        )
+        return
+
     logger.info(
         "PR review comment received",
         extra={
@@ -250,5 +261,32 @@ def _handle_review_comment_event(payload: dict, action: str) -> None:
         },
     )
 
-    # TODO (Day 18): Dispatch reply handler:
-    # handle_pr_reply.apply_async(args=[...], queue="fast_lane")
+    # Dispatch conversation reply handler (ADR-0037)
+    from app.tasks.conversation_task import handle_pr_reply
+
+    installation_id: int = payload.get("installation", {}).get("id", 0)
+    try:
+        handle_pr_reply.apply_async(
+            args=[
+                installation_id,
+                repo_full_name,
+                pr_number,
+                comment_id,
+                comment_body,
+                in_reply_to_id,
+            ],
+            queue="fast_lane",
+        )
+        logger.info(
+            "Conversation task dispatched",
+            extra={
+                "repo": repo_full_name,
+                "pr_number": pr_number,
+                "comment_id": comment_id,
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to dispatch conversation task",
+            extra={"repo": repo_full_name, "comment_id": comment_id},
+        )
