@@ -43,3 +43,4 @@ docker-compose.override.yml
 
 # Github Private Key
 openrabbit-ibrahimnazir.2026-02-27.private-key.pem
+node_modules/

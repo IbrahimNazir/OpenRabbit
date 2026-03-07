@@ -48,9 +48,13 @@ class DiffHunk:
     old_count: int
     new_start: int
     new_count: int
-    header: str                       # Raw @@ line
-    function_context: str | None      # e.g., "def process_payment():" from header
+    header: str                           # Raw @@ line
+    function_context: str | None          # e.g., "def process_payment():" from header
     lines: list[DiffLine] = field(default_factory=list)
+    # --- Phase 2 AST enrichment fields (populated by the orchestrator) ---
+    ast_function_context: str | None = None   # AST-derived enclosing function name
+    scope_context: str = ""                   # 5 lines before + hunk + 5 lines after
+    full_file_content: str | None = None      # Full file content at head_sha
 
 
 @dataclass

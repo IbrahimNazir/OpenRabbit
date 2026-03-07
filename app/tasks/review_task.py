@@ -8,6 +8,7 @@ and updates the DB with final status.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import time
 from typing import Any
@@ -78,24 +79,22 @@ def run_pr_review(
             base_sha=base_sha,
         )
 
-        # Run the async pipeline in a safe event loop for Celery
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-        result = loop.run_until_complete(
-            _run_async_pipeline(
-                installation_id=installation_id,
-                repo_full_name=repo_full_name,
-                pr_number=pr_number,
-                head_sha=head_sha,
-                base_sha=base_sha,
-                pr_title=pr_title,
-                pr_description=pr_description,
+        # Run the async pipeline in a dedicated thread with a fresh event loop.
+        # This avoids deadlocks when Celery's own event loop is running in this thread.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                asyncio.run,
+                _run_async_pipeline(
+                    installation_id=installation_id,
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    base_sha=base_sha,
+                    pr_title=pr_title,
+                    pr_description=pr_description,
+                ),
             )
-        )
+            result = future.result(timeout=300)  # 5-minute hard cap
 
         # Update DB record with results
         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -135,14 +134,11 @@ def run_pr_review(
 
         # Post error comment on the PR
         try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(
-                _post_error_comment(installation_id, repo_full_name, pr_number)
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(
+                    asyncio.run,
+                    _post_error_comment(installation_id, repo_full_name, pr_number),
+                ).result(timeout=30)
         except Exception:
             logger.exception("Failed to post error comment")
 
@@ -158,14 +154,11 @@ def run_pr_review(
             _update_review_record(review_id, status="failed", error_message=str(exc))
 
         try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            loop.run_until_complete(
-                _post_error_comment(installation_id, repo_full_name, pr_number)
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                executor.submit(
+                    asyncio.run,
+                    _post_error_comment(installation_id, repo_full_name, pr_number),
+                ).result(timeout=30)
         except Exception:
             logger.exception("Failed to post error comment")
 
@@ -213,16 +206,39 @@ async def _run_async_pipeline(
             pr_description=pr_description,
         )
 
+        # Build per-file position maps for multi-line comment support (ADR-0027).
+        # Re-fetch the diff here so we can map new-file line numbers → diff positions.
+        _pos_maps: dict[str, dict[int, int]] = {}
+        _hunk_ranges: dict[str, list[tuple[int, int]]] = {}
+        try:
+            from app.core.diff_parser import build_line_to_position_map, parse_diff
+
+            raw_diff = await github.get_pr_diff(repo_full_name, pr_number)
+            for fd in parse_diff(raw_diff):
+                _pos_maps[fd.filename] = build_line_to_position_map(fd)
+                _hunk_ranges[fd.filename] = [
+                    (h.new_start, h.new_start + max(h.new_count - 1, 0))
+                    for h in fd.hunks
+                ]
+        except Exception:
+            logger.warning("Could not build position maps — falling back to single-line comments")
+
         # Post inline review comments to GitHub
         if review_result.findings:
             comments: list[dict[str, Any]] = []
             for finding in review_result.findings:
                 comment_body = format_finding_comment(finding)
-                comments.append({
-                    "path": finding.file_path,
-                    "position": finding.diff_position,
-                    "body": comment_body,
-                })
+                comments.append(
+                    github.build_review_comment(
+                        file_path=finding.file_path,
+                        body=comment_body,
+                        line_start=finding.line_start,
+                        line_end=finding.line_end,
+                        diff_position=finding.diff_position,
+                        position_map=_pos_maps.get(finding.file_path, {}),
+                        hunk_line_ranges=_hunk_ranges.get(finding.file_path),
+                    )
+                )
 
             # Post the review with all inline comments
             try:

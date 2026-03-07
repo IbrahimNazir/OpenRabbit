@@ -39,6 +39,13 @@ try:
 except ImportError:
     GroqAsyncClient = None  # type: ignore
 
+try:
+    import anthropic as anthropic_sdk
+    from anthropic import AsyncAnthropic
+except ImportError:
+    anthropic_sdk = None  # type: ignore
+    AsyncAnthropic = None  # type: ignore
+
 from app.config import get_settings
 from app.core.exceptions import LLMError, LLMParseError, LLMRateLimitError
 
@@ -50,10 +57,14 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "llama-3.3-70b-versatile": (0.0, 0.0),  # Groq free tier
     "deepseek-chat": (0.14, 0.28),
     "deepseek-reasoner": (0.55, 2.19),
-    "claude-3-5-sonnet": (3.0, 15.0),
+    # Anthropic models
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
 }
 
 GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
 
 # Defaults
 DEFAULT_MODEL = "gemini-2.0-flash"
@@ -127,20 +138,33 @@ class LLMClient:
             except Exception as e:
                 logger.warning(f"Failed to initialize Groq client: {e}")
 
-        # Anthropic client (placeholder)
+        # Anthropic client
         self._anthropic_client = None
-        if settings.anthropic_api_key:
-            logger.info("Anthropic API key configured (not yet implemented)")
+        if AsyncAnthropic and settings.anthropic_api_key:
+            try:
+                self._anthropic_client = AsyncAnthropic(
+                    api_key=settings.anthropic_api_key,
+                    timeout=REQUEST_TIMEOUT,
+                )
+                logger.info("Anthropic client initialized")
+            except Exception as e:
+                logger.warning("Failed to initialize Anthropic client: %s", e)
 
         self._clients_initialized = True
 
         # Set default provider and model
         if self.provider == "gemini" and self._gemini_client:
             self.model = "gemini-2.0-flash"
+        elif self.provider == "anthropic" and self._anthropic_client:
+            self.model = ANTHROPIC_DEFAULT_MODEL
         elif self.provider == "deepseek" and self._openai_client:
             self.model = "deepseek-chat"
         elif self.provider == "groq" and self._groq_client:
             self.model = GROQ_DEFAULT_MODEL
+        elif self._anthropic_client:
+            self.provider = "anthropic"
+            self.model = ANTHROPIC_DEFAULT_MODEL
+            logger.info("Falling back to Anthropic as primary provider")
         elif self._groq_client:
             self.provider = "groq"
             self.model = GROQ_DEFAULT_MODEL
@@ -181,6 +205,16 @@ class LLMClient:
                     temperature=temperature,
                     start_time=start_time,
                 )
+            elif self.provider == "anthropic" and self._anthropic_client:
+                logger.info("Trying Anthropic provider")
+                return await self._complete_anthropic(
+                    prompt,
+                    system=system,
+                    model=effective_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    start_time=start_time,
+                )
             elif self.provider == "groq" and self._groq_client:
                 logger.info("Trying Groq provider")
                 return await self._complete_groq(
@@ -204,7 +238,7 @@ class LLMClient:
             else:
                 raise LLMError(f"Primary provider {self.provider} not available")
         except LLMRateLimitError as e:
-            logger.warning(f"Primary provider {self.provider} rate limited — trying fallback: {e}")
+            logger.warning("Primary provider %s rate limited — trying fallback: %s", self.provider, e)
             # Fallback priority: Groq → DeepSeek
             if self._groq_client and self.provider != "groq":
                 logger.info("Falling back to Groq")
@@ -548,6 +582,107 @@ class LLMClient:
                 else:
                     raise LLMError(
                         f"Connection failed after {MAX_RETRIES + 1} attempts"
+                    ) from e
+
+        raise LLMError("Unexpected retry loop exit") from last_error
+
+    # ------------------------------------------------------------------
+    #  Anthropic Implementation
+    # ------------------------------------------------------------------
+
+    async def _complete_anthropic(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        start_time: float,
+    ) -> tuple[str, float]:
+        """Call the Anthropic Messages API with retries."""
+        last_error: Exception | None = None
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if system:
+                    kwargs["system"] = system
+                # temperature is not supported alongside extended thinking;
+                # for standard calls it is valid but Anthropic ignores values
+                # outside [0, 1] — clamp to be safe.
+                kwargs["temperature"] = max(0.0, min(1.0, temperature))
+
+                response = await self._anthropic_client.messages.create(**kwargs)
+
+                text = ""
+                for block in response.content:
+                    if block.type == "text":
+                        text = block.text
+                        break
+
+                input_tokens = response.usage.input_tokens
+                output_tokens = response.usage.output_tokens
+                cost_usd = self._calculate_cost(model, input_tokens, output_tokens)
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+
+                logger.info(
+                    "LLM call completed",
+                    extra={
+                        "provider": "anthropic",
+                        "model": model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_usd": f"{cost_usd:.6f}",
+                        "duration_ms": duration_ms,
+                        "attempt": attempt + 1,
+                        "stop_reason": response.stop_reason,
+                    },
+                )
+
+                return text, cost_usd
+
+            except anthropic_sdk.RateLimitError as e:
+                last_error = e
+                logger.warning(
+                    "Anthropic rate limit hit — failing fast to trigger fallback",
+                    extra={"attempt": attempt + 1, "error": str(e)[:100]},
+                )
+                raise LLMRateLimitError(f"Anthropic rate limit: {str(e)[:200]}") from e
+
+            except anthropic_sdk.APIStatusError as e:
+                last_error = e
+                if e.status_code >= 500 and attempt < MAX_RETRIES:
+                    wait = SERVER_ERROR_BACKOFF[min(attempt, len(SERVER_ERROR_BACKOFF) - 1)]
+                    logger.warning(
+                        "Anthropic server error %d — retrying in %ds",
+                        e.status_code,
+                        wait,
+                        extra={"attempt": attempt + 1},
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise LLMError(
+                        f"Anthropic API error: {e.status_code} — {e.message}"
+                    ) from e
+
+            except anthropic_sdk.APIConnectionError as e:
+                last_error = e
+                if attempt < MAX_RETRIES:
+                    wait = SERVER_ERROR_BACKOFF[min(attempt, len(SERVER_ERROR_BACKOFF) - 1)]
+                    logger.warning(
+                        "Anthropic connection error — retrying in %ds",
+                        wait,
+                        extra={"attempt": attempt + 1},
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise LLMError(
+                        f"Anthropic connection failed after {MAX_RETRIES + 1} attempts"
                     ) from e
 
         raise LLMError("Unexpected retry loop exit") from last_error

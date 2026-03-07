@@ -370,11 +370,17 @@ class GitHubClient:
     ) -> dict:
         """Post a pull request review with inline comments.
 
+        Supports both single-line and multi-line comments (ADR-0027).
+        Each comment dict may include:
+        - ``path``, ``position``, ``body`` — single-line comment
+        - ``path``, ``start_line``, ``line``, ``start_side``, ``side``,
+          ``body`` — multi-line comment (no ``position`` key)
+
         Args:
             repo_full_name: ``owner/repo`` format.
             pr_number: PR number.
             head_sha: Commit SHA the review is for.
-            comments: List of ``{path, position, body}`` dicts.
+            comments: List of comment dicts.
             body: Top-level review body text.
 
         Returns:
@@ -405,6 +411,77 @@ class GitHubClient:
         response.raise_for_status()
 
         return response.json()
+
+    def build_review_comment(
+        self,
+        file_path: str,
+        body: str,
+        line_start: int,
+        line_end: int,
+        diff_position: int,
+        position_map: dict[int, int],
+        hunk_line_ranges: list[tuple[int, int]] | None = None,
+    ) -> dict[str, Any]:
+        """Build a GitHub review comment dict for a finding (ADR-0027).
+
+        Single-line (line_start == line_end) → ``{path, position, body}``
+        Multi-line → ``{path, start_line, line, start_side, side, body}``
+        Falls back to single-line if multi-line validation fails.
+
+        Args:
+            file_path: Repository-relative file path.
+            body: Comment markdown body.
+            line_start: First line of the finding (1-indexed, new file).
+            line_end: Last line of the finding (1-indexed, new file).
+            diff_position: Pre-computed diff position for single-line fallback.
+            position_map: ``{new_line: diff_position}`` from the file diff.
+            hunk_line_ranges: Optional list of ``(hunk_start, hunk_end)`` to
+                              validate same-hunk constraint.
+
+        Returns:
+            A dict suitable for the ``comments`` list of ``post_review()``.
+        """
+        if line_start >= line_end:
+            return {"path": file_path, "position": diff_position, "body": body}
+
+        start_pos = position_map.get(line_start)
+        end_pos = position_map.get(line_end)
+
+        if start_pos is None or end_pos is None:
+            return {"path": file_path, "position": diff_position, "body": body}
+
+        if hunk_line_ranges and not self._same_hunk(
+            line_start, line_end, hunk_line_ranges
+        ):
+            logger.debug(
+                "Multi-line comment crosses hunk boundary — falling back to single-line",
+                extra={"file": file_path, "start": line_start, "end": line_end},
+            )
+            return {"path": file_path, "position": diff_position, "body": body}
+
+        return {
+            "path": file_path,
+            "start_line": line_start,
+            "line": line_end,
+            "start_side": "RIGHT",
+            "side": "RIGHT",
+            "body": body,
+        }
+
+    @staticmethod
+    def _same_hunk(
+        line_start: int,
+        line_end: int,
+        hunk_ranges: list[tuple[int, int]],
+    ) -> bool:
+        """Return True if both lines are within the same hunk."""
+        for hunk_start, hunk_end in hunk_ranges:
+            if (
+                hunk_start <= line_start <= hunk_end
+                and hunk_start <= line_end <= hunk_end
+            ):
+                return True
+        return False
 
     async def post_review_comment(
         self,
