@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     gemini_api_key: str = ""
     groq_api_key: str = ""
+    huggingface_api_key: str = ""
     llm_provider: str = "groq"  # Options: 'gemini', 'deepseek', 'anthropic', 'groq'
 
     # --- Database ---

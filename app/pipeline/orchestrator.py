@@ -303,27 +303,40 @@ async def run_pipeline(
             )
 
     # ------------------------------------------------------------------
-    # Stage 2: Bug & Security Detection
+    # Parallelize Stages 2, 3, and 4
     # ------------------------------------------------------------------
-    bug_findings = await run_bug_detection(ctx)
-    stages.append("stage_2_bugs")
-
-    # ------------------------------------------------------------------
-    # Stage 3: Cross-File Impact (conditional)
-    # ------------------------------------------------------------------
-    xfile_findings: list[Finding] = []
-    if ctx.should_run_stage_3():
-        logger.info("Stage 3 triggered (risk=%s)", summary.risk_level)
-        xfile_findings = await run_cross_file_analysis(ctx)
-        stages.append("stage_3_xfile")
-    else:
+    async def _run_stage_3_wrapper() -> list[Finding]:
+        if ctx.should_run_stage_3():
+            logger.info("Stage 3 triggered (risk=%s)", summary.risk_level)
+            return await run_cross_file_analysis(ctx)
         logger.debug("Stage 3 skipped")
+        return []
 
-    # ------------------------------------------------------------------
-    # Stage 4: Style Review
-    # ------------------------------------------------------------------
-    style_findings = await run_style_review(ctx, existing_findings=bug_findings)
-    stages.append("stage_4_style")
+    bug_task = asyncio.create_task(run_bug_detection(ctx))
+    xfile_task = asyncio.create_task(_run_stage_3_wrapper())
+    style_task = asyncio.create_task(run_style_review(ctx))
+
+    parallel_results = await asyncio.gather(
+        bug_task, xfile_task, style_task, return_exceptions=True
+    )
+
+    bug_findings: list[Finding] = parallel_results[0] if isinstance(parallel_results[0], list) else []
+    if isinstance(parallel_results[0], list):
+        stages.append("stage_2_bugs")
+    else:
+        logger.exception("Stage 2 failed", exc_info=parallel_results[0] if isinstance(parallel_results[0], BaseException) else None)
+
+    xfile_findings: list[Finding] = parallel_results[1] if isinstance(parallel_results[1], list) else []
+    if isinstance(parallel_results[1], list) and ctx.should_run_stage_3():
+        stages.append("stage_3_xfile")
+    elif not isinstance(parallel_results[1], list):
+        logger.exception("Stage 3 failed", exc_info=parallel_results[1] if isinstance(parallel_results[1], BaseException) else None)
+
+    style_findings: list[Finding] = parallel_results[2] if isinstance(parallel_results[2], list) else []
+    if isinstance(parallel_results[2], list):
+        stages.append("stage_4_style")
+    else:
+        logger.exception("Stage 4 failed", exc_info=parallel_results[2] if isinstance(parallel_results[2], BaseException) else None)
 
     # ------------------------------------------------------------------
     # Stage 5: Synthesis & Deduplication

@@ -168,8 +168,28 @@ def handle_repos_added(payload: dict) -> None:
     if not repos_added:
         return
 
+    installation_data = payload.get("installation", {})
+    account_login: str = installation_data.get("account", {}).get("login", "unknown")
+    account_type: str = installation_data.get("account", {}).get("type", "User")
+
     session = get_sync_db()
     try:
+        # Ensure Installation record exists (FK target) — idempotent upsert
+        existing_inst = session.get(Installation, installation_id)
+        if not existing_inst:
+            session.add(
+                Installation(
+                    id=installation_id,
+                    account_login=account_login,
+                    account_type=account_type,
+                    is_active=True,
+                )
+            )
+            logger.info(
+                "Auto-created installation record from repos_added event",
+                extra={"installation_id": installation_id, "account": account_login},
+            )
+
         for repo_data in repos_added:
             repo_id: int = repo_data.get("id", 0)
             full_name: str = repo_data.get("full_name", "")

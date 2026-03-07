@@ -28,7 +28,7 @@ class SummaryResult:
     """Result of the PR summarization stage."""
 
     summary: str
-    key_changes: list[str] = field(default_factory=list)
+    core_components_modified: list[str] = field(default_factory=list)
     risk_level: str = "low"   # "low" | "medium" | "high"
     cost_usd: float = 0.0
 
@@ -48,7 +48,7 @@ async def run_summarization(
         llm_client: Initialized LLM client.
 
     Returns:
-        ``SummaryResult`` with summary text, key changes list, risk level,
+        ``SummaryResult`` with summary text, core components modified list, risk level,
         and cost.
     """
     diff_preview = diff_text[:DIFF_PREVIEW_CHARS]
@@ -70,10 +70,10 @@ async def run_summarization(
             return _fallback_result(cost)
 
         summary = str(data.get("summary", "PR reviewed."))
-        key_changes = data.get("key_changes", [])
-        if not isinstance(key_changes, list):
-            key_changes = []
-        key_changes = [str(c) for c in key_changes]
+        core_components_modified = data.get("core_components_modified", [])
+        if not isinstance(core_components_modified, list):
+            core_components_modified = []
+        core_components_modified = [str(c) for c in core_components_modified]
 
         risk_raw = str(data.get("risk_level", "low")).lower()
         risk_level = risk_raw if risk_raw in ("low", "medium", "high") else "low"
@@ -85,7 +85,7 @@ async def run_summarization(
 
         return SummaryResult(
             summary=summary,
-            key_changes=key_changes,
+            core_components_modified=core_components_modified,
             risk_level=risk_level,
             cost_usd=cost,
         )
@@ -98,7 +98,7 @@ async def run_summarization(
 def _fallback_result(cost: float) -> SummaryResult:
     return SummaryResult(
         summary="PR reviewed by OpenRabbit.",
-        key_changes=[],
+        core_components_modified=[],
         risk_level="low",
         cost_usd=cost,
     )

@@ -25,7 +25,7 @@ def create_embedding_service(redis: Any, settings: "Settings") -> EmbeddingServi
     return EmbeddingService(
         redis=redis,
         qdrant_url=settings.qdrant_url,
-        openai_api_key=settings.openai_api_key,
+        huggingface_api_key=settings.huggingface_api_key,
     )
 
 

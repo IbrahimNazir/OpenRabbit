@@ -39,14 +39,11 @@ _STYLE_SEVERITIES = {"low", "medium"}
 
 async def run_style_review(
     ctx: "ReviewContext",
-    existing_findings: list[Finding],
 ) -> list[Finding]:
     """Run style review across all reviewable hunks.
 
     Args:
         ctx: The shared ``ReviewContext``.
-        existing_findings: Findings already produced by Stage 2 (used to
-                           skip overlapping hunks).
 
     Returns:
         List of style ``Finding`` objects.
@@ -66,15 +63,6 @@ async def run_style_review(
         position_map = build_line_to_position_map(file_diff)
 
         for hunk in file_diff.hunks:
-            # Skip if this hunk's line range is already covered by Stage 2
-            if _is_covered(hunk, existing_findings, file_diff.filename):
-                logger.debug(
-                    "Stage 4: skipping hunk@%d in %s — covered by Stage 2",
-                    hunk.new_start,
-                    file_diff.filename,
-                )
-                continue
-
             task = asyncio.create_task(
                 _analyze_hunk_style(
                     file_diff, hunk, position_map, ctx, semaphore
@@ -102,25 +90,7 @@ async def run_style_review(
 # ---------------------------------------------------------------------------
 
 
-def _is_covered(
-    hunk: object,
-    existing: list[Finding],
-    file_path: str,
-    tolerance: int = 3,
-) -> bool:
-    """Return True if any existing finding overlaps with the hunk's range."""
-    hunk_start = hunk.new_start
-    hunk_end = hunk.new_start + hunk.new_count
 
-    for f in existing:
-        if f.file_path != file_path:
-            continue
-        if (
-            f.line_start <= hunk_end + tolerance
-            and f.line_end >= hunk_start - tolerance
-        ):
-            return True
-    return False
 
 
 async def _analyze_hunk_style(
@@ -143,6 +113,7 @@ async def _analyze_hunk_style(
             custom_guidelines = ctx.config.custom_guidelines or "(none)"
 
             prompt = PROMPT_STYLE_REVIEW.format(
+                pr_summary=ctx.summary.summary if ctx.summary else "PR reviewed.",
                 file_path=file_diff.filename,
                 language=file_diff.language or "text",
                 hunk_content=hunk_content,

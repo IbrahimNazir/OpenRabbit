@@ -1,4 +1,4 @@
-"""Embedding service: OpenAI text-embedding-3-small + Redis cache + Qdrant upsert.
+"""Embedding service: HuggingFace Qwen3-Embedding-8B + Redis cache + Qdrant upsert.
 
 Implements ADR-0028 (Qdrant collection schema) and ADR-0029 (Redis-cached embeddings).
 
@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
-import openai
+import httpx
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qdrant_models
 
@@ -33,12 +33,12 @@ logger = logging.getLogger(__name__)
 
 QDRANT_COLLECTION = "code_chunks"
 PAST_FINDINGS_COLLECTION = "past_findings"
-QDRANT_VECTOR_SIZE = 1536
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_COST_PER_1M_TOKENS = 0.02  # USD
+QDRANT_VECTOR_SIZE = 1024
+EMBEDDING_MODEL_ID = "mixedbread-ai/mxbai-embed-large-v1"
+HF_API_BASE = "https://router.huggingface.co/hf-inference"
 EMBED_CACHE_TTL = 30 * 24 * 3600  # 30 days
 QDRANT_UPSERT_BATCH = 500
-EMBED_API_BATCH = 100  # max texts per OpenAI embeddings call
+EMBED_API_BATCH = 32  # HF Inference API has tighter batch limits
 
 
 # ---------------------------------------------------------------------------
@@ -76,16 +76,64 @@ def _chunk_id_to_uuid(chunk_id: str) -> uuid.UUID:
 class EmbeddingService:
     """Handles embedding generation, Redis caching, and Qdrant storage.
 
+    Uses the HuggingFace Inference API with Qwen3-Embedding-8B.
+
     Args:
         redis: An async Redis client instance (redis.asyncio).
         qdrant_url: URL of the Qdrant server (e.g. 'http://localhost:6333').
-        openai_api_key: OpenAI API key for text-embedding-3-small.
+        huggingface_api_key: HuggingFace API token.
     """
 
-    def __init__(self, redis: Any, qdrant_url: str, openai_api_key: str) -> None:
+    def __init__(self, redis: Any, qdrant_url: str, huggingface_api_key: str) -> None:
         self._redis = redis
         self._qdrant = AsyncQdrantClient(url=qdrant_url, timeout=30)
-        self._openai = openai.AsyncOpenAI(api_key=openai_api_key)
+        self._hf_client = httpx.AsyncClient(
+            base_url=HF_API_BASE,
+            headers={"Authorization": f"Bearer {huggingface_api_key}"},
+            timeout=180.0,  # Large models can be slow on cold start
+        )
+
+    # ------------------------------------------------------------------
+    #  HuggingFace Inference API
+    # ------------------------------------------------------------------
+
+    async def _call_hf_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Call HuggingFace Inference API for embeddings.
+
+        Sends texts to the feature-extraction pipeline and returns
+        one embedding vector per input text.
+        """
+        response = await self._hf_client.post(
+            f"/models/{EMBEDDING_MODEL_ID}",
+            json={"inputs": texts},
+        )
+
+        if response.status_code == 503:
+            body = response.json()
+            estimated = body.get("estimated_time", "unknown")
+            raise EmbeddingError(
+                f"Model {EMBEDDING_MODEL_ID} is loading (est. {estimated}s). "
+                "The Celery task will retry automatically."
+            )
+
+        if response.status_code >= 400:
+            logger.error(
+                "HF embedding API error",
+                extra={"status": response.status_code, "body": response.text[:500]},
+            )
+            raise EmbeddingError(
+                f"HF Inference API error {response.status_code}: {response.text[:300]}"
+            )
+
+        data = response.json()
+
+        # Normalize response format
+        if not data:
+            return []
+        # Single flat vector [0.1, 0.2, ...] for single input
+        if isinstance(data[0], (int, float)):
+            return [data]
+        return data
 
     # ------------------------------------------------------------------
     #  Collection setup
@@ -94,6 +142,9 @@ class EmbeddingService:
     async def ensure_collection(self, collection_name: str = QDRANT_COLLECTION) -> None:
         """Create the Qdrant collection if it does not exist.
 
+        If the collection exists but has a different vector size (e.g. from a
+        previous provider), it is recreated.
+
         For ``code_chunks``, also creates a text payload index on the
         ``content`` field to support keyword-based caller lookup (ADR-0032).
         """
@@ -101,7 +152,19 @@ class EmbeddingService:
             collections = await self._qdrant.get_collections()
             existing = {c.name for c in collections.collections}
             if collection_name in existing:
-                return
+                # Verify vector size matches
+                info = await self._qdrant.get_collection(collection_name)
+                current_size = info.config.params.vectors.size  # type: ignore[union-attr]
+                if current_size != QDRANT_VECTOR_SIZE:
+                    logger.warning(
+                        "Collection '%s' vector size mismatch (%d != %d) — recreating",
+                        collection_name,
+                        current_size,
+                        QDRANT_VECTOR_SIZE,
+                    )
+                    await self._qdrant.delete_collection(collection_name)
+                else:
+                    return
 
             await self._qdrant.create_collection(
                 collection_name=collection_name,
@@ -145,14 +208,13 @@ class EmbeddingService:
             logger.debug("Redis cache read failed for embedding key %s", cache_key)
 
         try:
-            response = await self._openai.embeddings.create(
-                input=[text],
-                model=EMBEDDING_MODEL,
-            )
+            vectors = await self._call_hf_embeddings([text])
+            vector = vectors[0]
+        except EmbeddingError:
+            raise
         except Exception as exc:
-            raise EmbeddingError(f"OpenAI embedding call failed: {exc}") from exc
+            raise EmbeddingError(f"HF embedding call failed: {exc}") from exc
 
-        vector = response.data[0].embedding
         try:
             await self._redis.setex(cache_key, EMBED_CACHE_TTL, json.dumps(vector))
         except Exception:
@@ -194,14 +256,12 @@ class EmbeddingService:
         for batch_start in range(0, len(miss_texts), EMBED_API_BATCH):
             batch = miss_texts[batch_start : batch_start + EMBED_API_BATCH]
             try:
-                response = await self._openai.embeddings.create(
-                    input=batch,
-                    model=EMBEDDING_MODEL,
-                )
+                batch_vectors = await self._call_hf_embeddings(batch)
+            except EmbeddingError:
+                raise
             except Exception as exc:
-                raise EmbeddingError(f"OpenAI batch embedding failed: {exc}") from exc
+                raise EmbeddingError(f"HF batch embedding failed: {exc}") from exc
 
-            batch_vectors = [item.embedding for item in response.data]
             miss_vectors.extend(batch_vectors)
 
             # Store new embeddings in Redis
@@ -436,8 +496,12 @@ class EmbeddingService:
     # ------------------------------------------------------------------
 
     async def aclose(self) -> None:
-        """Close the async Qdrant client connection."""
+        """Close the async Qdrant and HTTP clients."""
         try:
             await self._qdrant.close()
+        except Exception:
+            pass
+        try:
+            await self._hf_client.aclose()
         except Exception:
             pass

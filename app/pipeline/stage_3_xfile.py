@@ -255,6 +255,8 @@ async def _analyze_impact(
     call_sites_text = json.dumps(call_sites, indent=2)
 
     prompt = PROMPT_CROSS_FILE_IMPACT.format(
+        pr_summary=ctx.summary.summary if ctx.summary else "PR reviewed.",
+        file_path=changed_file_diff.filename,
         changed_function=func_name,
         change_description=change_description,
         call_sites=call_sites_text,
@@ -266,27 +268,21 @@ async def _analyze_impact(
             system=SYSTEM_REVIEWER,
         )
 
-        if not isinstance(data, dict):
-            return []
-
-        if not data.get("has_breaking_changes"):
-            return []
-
-        affected = data.get("affected_call_sites", [])
-        if not isinstance(affected, list):
+        if not isinstance(data, list):
             return []
 
         findings: list[Finding] = []
         position_map = build_line_to_position_map(changed_file_diff)
 
-        for site in affected:
+        for site in data:
             if not isinstance(site, dict):
                 continue
 
             file_path = str(site.get("file", changed_file_diff.filename))
-            line = int(site.get("line") or 0)
-            issue = str(site.get("issue", "Potential breaking change"))
-            suggestion = str(site.get("suggestion", ""))
+            line = int(site.get("line_start", site.get("line", 0)))
+            issue = str(site.get("title", "Potential breaking change"))
+            body = str(site.get("body", issue))
+            suggestion = site.get("suggestion_code")
 
             # Find the diff for this file to get its position map
             target_diff = next(
@@ -300,21 +296,21 @@ async def _analyze_impact(
             if diff_pos is None:
                 continue
 
-            body = issue
+            finding_body = f"**{issue}**\n\n{body}"
             if suggestion:
-                body += f"\n\n**Suggested fix:** {suggestion}"
+                finding_body += f"\n\n**Suggested fix:**\n```\n{suggestion}\n```"
 
             findings.append(
                 Finding(
                     file_path=file_path,
                     line_start=line,
-                    line_end=line,
+                    line_end=int(site.get("line_end", line)),
                     diff_position=diff_pos,
-                    severity="high",
+                    severity=str(site.get("severity", "high")).lower(),
                     category="breaking-change",
                     title=f"Breaking change: `{func_name}` call site may be affected",
-                    body=body,
-                    suggestion_code=None,
+                    body=finding_body,
+                    suggestion_code=suggestion,
                     confidence=0.75,
                 )
             )

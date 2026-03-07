@@ -12,6 +12,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    ForeignKey,
     Index,
     String,
     Text,
@@ -59,6 +60,7 @@ class Repository(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)  # GitHub repo_id
     installation_id: Mapped[int] = mapped_column(
         BigInteger,
+        ForeignKey("installations.id"),
         nullable=False,
     )
     full_name: Mapped[str] = mapped_column(String(500), nullable=False)  # owner/repo

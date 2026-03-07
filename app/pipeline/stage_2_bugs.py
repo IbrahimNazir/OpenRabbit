@@ -292,6 +292,7 @@ async def _analyze_file_level(
                     full_file_context = rag_section + "\n\n---\n\n" + full_file_context
 
             prompt = PROMPT_BUG_DETECTION.format(
+                pr_summary=summary_text,
                 file_path=file_diff.filename,
                 language=file_diff.language or "text",
                 hunk_content=full_file[:8000],  # cap context
@@ -368,6 +369,7 @@ async def _analyze_hunk_level(
             full_file_context = "\n\n".join(full_file_context_parts)
 
             prompt = PROMPT_BUG_DETECTION.format(
+                pr_summary=summary_text,
                 file_path=file_diff.filename,
                 language=file_diff.language or "text",
                 hunk_content=hunk_content,

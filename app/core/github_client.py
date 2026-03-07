@@ -57,7 +57,9 @@ class GitHubClient:
     def __init__(self, installation_id: int, redis: Any, client: httpx.AsyncClient | None = None) -> None:
         self.installation_id = installation_id
         self.redis = redis
-        self.client = client or httpx.AsyncClient(timeout=30.0)
+        self.client = client or httpx.AsyncClient(
+            base_url=GITHUB_API_BASE, timeout=30.0
+        )
 
     # ------------------------------------------------------------------
     #  Authentication

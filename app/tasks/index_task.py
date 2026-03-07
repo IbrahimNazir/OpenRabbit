@@ -11,7 +11,6 @@ import concurrent.futures
 import logging
 import time
 from typing import Any
-
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -115,7 +114,7 @@ async def _run_async_indexing(
         embedding_service = EmbeddingService(
             redis=redis_client,
             qdrant_url=settings.qdrant_url,
-            openai_api_key=settings.openai_api_key,
+            huggingface_api_key=settings.huggingface_api_key,
         )
 
         # Ensure both Qdrant collections exist
@@ -134,7 +133,7 @@ async def _run_async_indexing(
         progress = await indexer.index_repository(repo_full_name, repo_id, head_sha)
 
         # Post a completion comment on the most recently updated open PR
-        if progress.status == "completed":
+        if progress.status == "completed" and progress.chunks_total > 0:
             await _post_indexing_complete_comment(
                 github, repo_full_name, progress.chunks_total
             )
