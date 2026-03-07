@@ -2,7 +2,7 @@
 .env
 *.pem
 private-key.pem
-
+.claude
 # Python
 __pycache__/
 *.py[cod]

@@ -34,31 +34,38 @@ try:
 except ImportError:
     openai = None  # type: ignore
 
+try:
+    from groq import AsyncGroq as GroqAsyncClient
+except ImportError:
+    GroqAsyncClient = None  # type: ignore
+
 from app.config import get_settings
 from app.core.exceptions import LLMError, LLMParseError, LLMRateLimitError
 
 logger = logging.getLogger(__name__)
 
 # Pricing per 1M tokens (input / output)
-# Gemini Pro 1.5: free tier (some quotas)
-# DeepSeek: paid API
 MODEL_PRICING: dict[str, tuple[float, float]] = {
-    "gemini-2.0-flash": (0.0, 0.0),  # Free tier
+    "gemini-2.0-flash": (0.0, 0.0),
+    "llama-3.3-70b-versatile": (0.0, 0.0),  # Groq free tier
     "deepseek-chat": (0.14, 0.28),
     "deepseek-reasoner": (0.55, 2.19),
     "claude-3-5-sonnet": (3.0, 15.0),
 }
 
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+
 # Defaults
 DEFAULT_MODEL = "gemini-2.0-flash"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0.2
-REQUEST_TIMEOUT = 120.0
+REQUEST_TIMEOUT = 200.0
 
 # Retry constants per ADR-0014
-RATE_LIMIT_WAIT_SECONDS = 60
 SERVER_ERROR_BACKOFF = [5, 15, 45]
 MAX_RETRIES = 3
+# Minimum seconds between successive Gemini calls (free tier = 15 RPM)
+GEMINI_INTER_REQUEST_DELAY = 4.0
 
 
 class LLMClient:
@@ -108,20 +115,37 @@ class LLMClient:
             except Exception as e:
                 logger.warning(f"Failed to initialize DeepSeek/OpenAI client: {e}")
         
+        # Groq client
+        self._groq_client = None
+        if GroqAsyncClient and settings.groq_api_key:
+            try:
+                self._groq_client = GroqAsyncClient(
+                    api_key=settings.groq_api_key,
+                    timeout=REQUEST_TIMEOUT,
+                )
+                logger.info("Groq client initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Groq client: {e}")
+
         # Anthropic client (placeholder)
         self._anthropic_client = None
         if settings.anthropic_api_key:
             logger.info("Anthropic API key configured (not yet implemented)")
-        
+
         self._clients_initialized = True
-        
+
         # Set default provider and model
         if self.provider == "gemini" and self._gemini_client:
             self.model = "gemini-2.0-flash"
         elif self.provider == "deepseek" and self._openai_client:
             self.model = "deepseek-chat"
+        elif self.provider == "groq" and self._groq_client:
+            self.model = GROQ_DEFAULT_MODEL
+        elif self._groq_client:
+            self.provider = "groq"
+            self.model = GROQ_DEFAULT_MODEL
+            logger.info("Falling back to Groq as primary provider")
         elif self._openai_client:
-            # Fallback to DeepSeek if primary provider not available
             self.provider = "deepseek"
             self.model = "deepseek-chat"
             logger.info("Falling back to DeepSeek as primary provider")
@@ -157,6 +181,16 @@ class LLMClient:
                     temperature=temperature,
                     start_time=start_time,
                 )
+            elif self.provider == "groq" and self._groq_client:
+                logger.info("Trying Groq provider")
+                return await self._complete_groq(
+                    prompt,
+                    system=system,
+                    model=effective_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    start_time=start_time,
+                )
             elif self.provider == "deepseek" and self._openai_client:
                 logger.info("Trying DeepSeek provider")
                 return await self._complete_deepseek(
@@ -170,10 +204,20 @@ class LLMClient:
             else:
                 raise LLMError(f"Primary provider {self.provider} not available")
         except LLMRateLimitError as e:
-            # If primary provider has rate limit/quota issues, try fallback
-            logger.warning(f"Primary provider {self.provider} rate limited, trying fallback: {e}")
-            if self.provider == "gemini" and self._openai_client:
-                logger.info("Falling back to DeepSeek due to Gemini quota")
+            logger.warning(f"Primary provider {self.provider} rate limited — trying fallback: {e}")
+            # Fallback priority: Groq → DeepSeek
+            if self._groq_client and self.provider != "groq":
+                logger.info("Falling back to Groq")
+                return await self._complete_groq(
+                    prompt,
+                    system=system,
+                    model=GROQ_DEFAULT_MODEL,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    start_time=start_time,
+                )
+            if self._openai_client and self.provider != "deepseek":
+                logger.info("Falling back to DeepSeek")
                 return await self._complete_deepseek(
                     prompt,
                     system=system,
@@ -183,7 +227,7 @@ class LLMClient:
                     start_time=start_time,
                 )
             logger.error("No fallback provider available")
-            raise  # Re-raise if no fallback available
+            raise
 
     async def complete_with_json(
         self,
@@ -288,24 +332,31 @@ class LLMClient:
                     },
                 )
 
+                # Throttle to stay under Gemini free tier (15 RPM).
+                # Sleep only for the remaining time if the call was fast.
+                elapsed = time.monotonic() - start_time
+                remaining = GEMINI_INTER_REQUEST_DELAY - elapsed
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+
                 return text, cost_usd
 
             except Exception as e:
                 last_error = e
                 # Check for specific error types
                 error_str = str(e).lower()
-                if any(x in error_str for x in ["rate_limit", "too many requests", "quota", "429"]) or isinstance(e, ResourceExhausted):
-                    if attempt < MAX_RETRIES:
-                        logger.warning(
-                            "Gemini rate limit/quota hit — waiting %ds before retry",
-                            RATE_LIMIT_WAIT_SECONDS,
-                            extra={"attempt": attempt + 1},
-                        )
-                        await asyncio.sleep(RATE_LIMIT_WAIT_SECONDS)
-                    else:
-                        raise LLMRateLimitError(
-                            f"Rate limit/quota exceeded after {MAX_RETRIES + 1} attempts"
-                        ) from e
+                if any(x in error_str for x in ["rate_limit", "too many requests", "quota", "429"]) or (
+                    ResourceExhausted is not None and isinstance(e, ResourceExhausted)
+                ):
+                    # Fail fast — let complete() fall back to another provider immediately.
+                    # Sleeping here wastes time; Celery will retry the whole task if needed.
+                    logger.warning(
+                        "Gemini rate limit/quota hit — failing fast to trigger fallback",
+                        extra={"attempt": attempt + 1, "error": str(e)[:100]},
+                    )
+                    raise LLMRateLimitError(
+                        f"Gemini rate limit/quota exceeded: {str(e)[:200]}"
+                    ) from e
                 elif any(x in error_str for x in ["500", "502", "503", "service"]):
                     if attempt < MAX_RETRIES:
                         wait = SERVER_ERROR_BACKOFF[
@@ -321,6 +372,78 @@ class LLMClient:
                         raise LLMError(f"Gemini API error after retries: {str(e)}") from e
                 else:
                     raise LLMError(f"Gemini API error: {str(e)}") from e
+
+        raise LLMError("Unexpected retry loop exit") from last_error
+
+    # ------------------------------------------------------------------
+    #  Groq Implementation (OpenAI-compatible async SDK)
+    # ------------------------------------------------------------------
+
+    async def _complete_groq(
+        self,
+        prompt: str,
+        *,
+        system: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        start_time: float,
+    ) -> tuple[str, float]:
+        """Call Groq API with retries."""
+        last_error: Exception | None = None
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = await self._groq_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+
+                text = response.choices[0].message.content or ""
+                input_tokens = response.usage.prompt_tokens if response.usage else 0
+                output_tokens = response.usage.completion_tokens if response.usage else 0
+                cost_usd = self._calculate_cost(model, input_tokens, output_tokens)
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+
+                logger.info(
+                    "LLM call completed",
+                    extra={
+                        "provider": "groq",
+                        "model": model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_usd": f"{cost_usd:.6f}",
+                        "duration_ms": duration_ms,
+                        "attempt": attempt + 1,
+                    },
+                )
+                return text, cost_usd
+
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                if any(x in error_str for x in ["rate_limit", "too many requests", "quota", "429"]):
+                    logger.warning(
+                        "Groq rate limit hit — failing fast to trigger fallback",
+                        extra={"attempt": attempt + 1, "error": str(e)[:100]},
+                    )
+                    raise LLMRateLimitError(f"Groq rate limit: {str(e)[:200]}") from e
+                elif any(x in error_str for x in ["500", "502", "503", "service"]):
+                    if attempt < MAX_RETRIES:
+                        wait = SERVER_ERROR_BACKOFF[min(attempt, len(SERVER_ERROR_BACKOFF) - 1)]
+                        logger.warning("Groq server error — retrying in %ds", wait)
+                        await asyncio.sleep(wait)
+                    else:
+                        raise LLMError(f"Groq API error after retries: {str(e)}") from e
+                else:
+                    raise LLMError(f"Groq API error: {str(e)}") from e
 
         raise LLMError("Unexpected retry loop exit") from last_error
 

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # MVP limits per ADR-0015
 MAX_FILES_PER_REVIEW = 10
 MAX_HUNKS_PER_FILE = 5
-LLM_CONCURRENCY = 5  # Max parallel LLM calls
+LLM_CONCURRENCY = 1  # Sequential on free-tier Gemini (15 RPM limit)
 
 
 async def run_pipeline(
