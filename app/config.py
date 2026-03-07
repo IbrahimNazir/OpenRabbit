@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     # --- AI / LLM ---
     anthropic_api_key: str = ""
     deepseek_api_key: str = ""
+    gemini_api_key: str = ""
+    llm_provider: str = "gemini"  # Options: 'gemini', 'deepseek', 'anthropic'
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://openrabbit:devpassword@localhost:5432/openrabbit"

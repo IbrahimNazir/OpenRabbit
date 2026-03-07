@@ -16,19 +16,41 @@ from app.llm.client import LLMClient
 
 
 @pytest.fixture
-def mock_settings():
-    """Provide mock settings with a test API key."""
+def mock_settings_deepseek():
+    """Provide mock settings for DeepSeek provider."""
     with patch("app.llm.client.get_settings") as mock:
         settings = MagicMock()
         settings.deepseek_api_key = "test-key-123"
+        settings.llm_provider = "deepseek"
+        settings.gemini_api_key = ""
         mock.return_value = settings
         yield settings
 
 
 @pytest.fixture
-def llm_client(mock_settings):
-    """Create an LLMClient with mocked settings."""
-    return LLMClient()
+def mock_settings_gemini():
+    """Provide mock settings for Gemini provider."""
+    with patch("app.llm.client.get_settings") as mock:
+        settings = MagicMock()
+        settings.gemini_api_key = "test-gemini-key"
+        settings.llm_provider = "gemini"
+        settings.deepseek_api_key = ""
+        mock.return_value = settings
+        yield settings
+
+
+@pytest.fixture
+def llm_client_deepseek(mock_settings_deepseek):
+    """Create an LLMClient configured for DeepSeek."""
+    with patch("app.llm.client.openai"):
+        return LLMClient()
+
+
+@pytest.fixture
+def llm_client_gemini(mock_settings_gemini):
+    """Create an LLMClient configured for Gemini."""
+    with patch("app.llm.client.genai"):
+        return LLMClient()
 
 
 # ---------------------------------------------------------------------------
@@ -61,28 +83,32 @@ class TestComplete:
     """Tests for the basic complete() method."""
 
     @pytest.mark.asyncio
-    async def test_successful_completion(self, llm_client):
-        """LLM call returns text and cost."""
+    async def test_successful_completion_deepseek(self, llm_client_deepseek):
+        """LLM call returns text and cost via DeepSeek."""
         response = _make_response("Hello, world!", input_tokens=100, output_tokens=50)
-        llm_client._client.chat = MagicMock()
-        llm_client._client.chat.completions = MagicMock()
-        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
+        llm_client_deepseek._openai_client.chat = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions.create = AsyncMock(
+            return_value=response
+        )
 
-        text, cost = await llm_client.complete("What is Python?")
+        text, cost = await llm_client_deepseek.complete("What is Python?")
 
         assert text == "Hello, world!"
         assert cost > 0
-        llm_client._client.chat.completions.create.assert_called_once()
+        llm_client_deepseek._openai_client.chat.completions.create.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_cost_calculation(self, llm_client):
+    async def test_cost_calculation(self, llm_client_deepseek):
         """Cost is calculated correctly for DeepSeek chat model."""
         response = _make_response("result", input_tokens=1000, output_tokens=500)
-        llm_client._client.chat = MagicMock()
-        llm_client._client.chat.completions = MagicMock()
-        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
+        llm_client_deepseek._openai_client.chat = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions.create = AsyncMock(
+            return_value=response
+        )
 
-        _, cost = await llm_client.complete("test", model="deepseek-chat")
+        _, cost = await llm_client_deepseek.complete("test", model="deepseek-chat")
 
         # DeepSeek Chat: $0.14/1M input, $0.28/1M output
         expected = (1000 * 0.14 + 500 * 0.28) / 1_000_000
@@ -98,63 +124,69 @@ class TestCompleteWithJson:
     """Tests for JSON-parsing completion."""
 
     @pytest.mark.asyncio
-    async def test_parses_clean_json(self, llm_client):
+    async def test_parses_clean_json(self, llm_client_deepseek):
         """Parses clean JSON response."""
         json_str = json.dumps({"summary": "test", "risk_level": "low"})
         response = _make_response(json_str)
-        llm_client._client.chat = MagicMock()
-        llm_client._client.chat.completions = MagicMock()
-        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
+        llm_client_deepseek._openai_client.chat = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions.create = AsyncMock(
+            return_value=response
+        )
 
-        data, cost = await llm_client.complete_with_json("Summarize this")
+        data, cost = await llm_client_deepseek.complete_with_json("Summarize this")
 
         assert isinstance(data, dict)
         assert data["summary"] == "test"
 
     @pytest.mark.asyncio
-    async def test_strips_markdown_fences(self, llm_client):
+    async def test_strips_markdown_fences(self, llm_client_deepseek):
         """Strips ```json ... ``` fences from LLM output before parsing."""
         json_str = '```json\n{"key": "value"}\n```'
         response = _make_response(json_str)
-        llm_client._client.chat = MagicMock()
-        llm_client._client.chat.completions = MagicMock()
-        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
+        llm_client_deepseek._openai_client.chat = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions.create = AsyncMock(
+            return_value=response
+        )
 
-        data, cost = await llm_client.complete_with_json("Return JSON")
+        data, cost = await llm_client_deepseek.complete_with_json("Return JSON")
 
         assert isinstance(data, dict)
         assert data["key"] == "value"
 
     @pytest.mark.asyncio
-    async def test_parses_json_array(self, llm_client):
+    async def test_parses_json_array(self, llm_client_deepseek):
         """Parses JSON array response."""
         json_str = json.dumps([{"line_start": 10, "severity": "high"}])
         response = _make_response(json_str)
-        llm_client._client.chat = MagicMock()
-        llm_client._client.chat.completions = MagicMock()
-        llm_client._client.chat.completions.create = AsyncMock(return_value=response)
+        llm_client_deepseek._openai_client.chat = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions.create = AsyncMock(
+            return_value=response
+        )
 
-        data, cost = await llm_client.complete_with_json("Find bugs")
+        data, cost = await llm_client_deepseek.complete_with_json("Find bugs")
 
         assert isinstance(data, list)
         assert data[0]["severity"] == "high"
 
     @pytest.mark.asyncio
-    async def test_retry_on_invalid_json(self, llm_client):
+    async def test_retry_on_invalid_json(self, llm_client_deepseek):
         """Retries once with strict JSON instruction when first response is invalid."""
         bad_response = _make_response("Not valid JSON at all")
         good_response = _make_response('{"result": "ok"}')
 
-        llm_client._client.chat = MagicMock()
-        llm_client._client.chat.completions = MagicMock()
-        llm_client._client.chat.completions.create = AsyncMock(
+        llm_client_deepseek._openai_client.chat = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions = MagicMock()
+        llm_client_deepseek._openai_client.chat.completions.create = AsyncMock(
             side_effect=[bad_response, good_response]
         )
 
-        data, cost = await llm_client.complete_with_json("Return JSON")
+        data, cost = await llm_client_deepseek.complete_with_json("Return JSON")
 
         assert data["result"] == "ok"
-        assert llm_client._client.chat.completions.create.call_count == 2
+        assert llm_client_deepseek._openai_client.chat.completions.create.call_count == 2
 
 
 # ---------------------------------------------------------------------------

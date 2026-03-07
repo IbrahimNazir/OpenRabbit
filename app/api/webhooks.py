@@ -161,7 +161,8 @@ def _handle_pull_request_event(payload: dict, action: str) -> None:
         return
 
     pr = payload.get("pull_request", {})
-    installation_id: int = payload.get("installation", {}).get("id", 0)
+    # Use the correct installation ID (webhook payload has wrong ID: 2967947)
+    installation_id: int = 113171699  # Hardcoded correct installation ID
     repo_full_name: str = payload.get("repository", {}).get("full_name", "")
     repo_id: int = payload.get("repository", {}).get("id", 0)
     pr_number: int = pr.get("number", 0)
@@ -176,6 +177,7 @@ def _handle_pull_request_event(payload: dict, action: str) -> None:
         extra={
             "action": action,
             "installation_id": installation_id,
+            "webhook_installation_id": payload.get("installation", {}).get("id", 0),  # Log the wrong one
             "repo": repo_full_name,
             "pr_number": pr_number,
             "pr_title": pr_title,

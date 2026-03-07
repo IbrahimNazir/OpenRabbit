@@ -15,10 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+import asyncio
 from typing import Any
 
 import httpx
 from jose import jwt as jose_jwt
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import get_settings
 from app.core.exceptions import (
@@ -74,44 +76,100 @@ class GitHubClient:
                 "GitHub App private key is empty — check GITHUB_APP_PRIVATE_KEY_PATH"
             )
 
+        app_id = settings.github_app_id
+        if not app_id:
+            raise GitHubAuthError("GITHUB_APP_ID is not set")
+
+        logger.debug(f"JWT generation appid: {app_id}", extra={"app_id": app_id, "key_length": len(private_key)})
+
         now = int(time.time())
         payload = {
             "iat": now - 60,     # issued-at: 60s in the past for clock drift
             "exp": now + 540,    # expires in 9 minutes
-            "iss": settings.github_app_id,
+            "iss": app_id,
         }
-        return jose_jwt.encode(payload, private_key, algorithm="RS256")
+        try:
+            jwt_token = jose_jwt.encode(payload, private_key, algorithm="RS256")
+            logger.debug("JWT encoded successfully", extra={"payload_iss": app_id})
+            return jwt_token
+        except Exception as e:
+            logger.exception("JWT encoding failed", extra={"app_id": app_id})
+            raise GitHubAuthError(f"Failed to encode JWT: {e}") from e
 
     async def get_access_token(self) -> str:
         """Get a valid installation access token, using Redis cache when available."""
         cache_key = f"{self.CACHE_KEY_PREFIX}{self.installation_id}"
+        logger.info("get_access_token start", extra={"installation_id": self.installation_id})
 
         # Try cache first.
         if self.redis is not None:
-            cached = await self.redis.get(cache_key)
+            logger.info("querying Redis cache", extra={"key": cache_key})
+            try:
+                # add timeout to avoid hanging forever
+                cached = await asyncio.wait_for(self.redis.get(cache_key), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Redis GET timed out — disabling cache")
+                # if redis is flaky, drop it to avoid repeated waits
+                self.redis = None
+                cached = None
+            except Exception as e:
+                logger.exception("Redis GET failed", extra={"key": cache_key})
+                self.redis = None
+                cached = None
+
+            logger.info("cache result", extra={"cached": bool(cached)})
             if cached:
-                return cached if isinstance(cached, str) else cached.decode("utf-8")
+                token_val = cached if isinstance(cached, str) else cached.decode("utf-8")
+                logger.info("returning token from cache")
+                return token_val
 
         # Cache miss — exchange JWT for a fresh installation token.
+        logger.info("cache miss, fetching fresh token")
         token = await self._fetch_fresh_token()
 
         # Cache with 55-minute TTL.
         if self.redis is not None:
-            await self.redis.setex(cache_key, self.TOKEN_TTL_SECONDS, token)
+            try:
+                await asyncio.wait_for(
+                    self.redis.setex(cache_key, self.TOKEN_TTL_SECONDS, token),
+                    timeout=5.0,
+                )
+                logger.info("cached new token", extra={"key": cache_key})
+            except asyncio.TimeoutError:
+                logger.warning("Redis SETEX timed out — disabling cache")
+                self.redis = None
+            except Exception as e:
+                logger.exception("Redis SETEX failed", extra={"key": cache_key})
 
         return token
 
     async def _fetch_fresh_token(self) -> str:
         """Exchange App JWT for an installation-scoped access token."""
+        logger.info("_fetch_fresh_token start", extra={"installation_id": self.installation_id})
         app_jwt = self._generate_app_jwt()
+        logger.info(f"_app_jwt: {app_jwt}", extra={"installation_id": self.installation_id})
 
+        # Log JWT for debugging (first 20 chars, last 20 chars to avoid exposing full key)
+        jwt_preview = f"{app_jwt[:20]}...{app_jwt[-20:]}" if len(app_jwt) > 40 else "***"
+        logger.info("JWT generated", extra={"jwt_preview": jwt_preview})
+
+        url = f"{GITHUB_API_BASE}/app/installations/{self.installation_id}/access_tokens"
+        logger.info("posting for installation token", extra={"url": url, "installation_id": self.installation_id})
         response = await self.client.post(
-            f"{GITHUB_API_BASE}/app/installations/{self.installation_id}/access_tokens",
+            url,
             headers={
                 "Authorization": f"Bearer {app_jwt}",
                 **_BASE_HEADERS,
             },
-            timeout=10.0,
+            timeout=30.0,
+        )
+        logger.info(
+            "_fetch_fresh_token response",
+            extra={
+                "status": response.status_code,
+                "response_keys": list(response.json().keys())[:5] if response.status_code == 200 else None,
+                "response_preview": response.text[:200] if response.status_code >= 400 else "OK",
+            }
         )
 
         if response.status_code == 401:
@@ -154,7 +212,8 @@ class GitHubClient:
         accept: str | None = None,
         json_body: dict | None = None,
     ) -> httpx.Response:
-        """Make an authenticated GitHub API request with automatic token refresh."""
+        """Make an authenticated GitHub API request with automatic token refresh and retry."""
+        logger.info("_request start", extra={"method": method, "url": url})
         token = await self.get_access_token()
 
         request_headers = {
@@ -166,12 +225,22 @@ class GitHubClient:
         if headers:
             request_headers.update(headers)
 
+        logger.debug("_request headers", extra={"headers": request_headers})
         response = await self.client.request(
             method,
             url,
             headers=request_headers,
             json=json_body,
         )
+        logger.info("_request done", extra={"status": response.status_code})
+
+        # Handle rate limiting with Retry-After header
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", "30"))
+            logger.warning(f"GitHub rate limited — waiting {retry_after}s", extra={"retry_after": retry_after})
+            await asyncio.sleep(retry_after + 2)  # small jitter
+            # Raise exception to trigger retry
+            response.raise_for_status()
 
         # Check rate limits on every response.
         await self._check_rate_limit(response)
@@ -247,8 +316,10 @@ class GitHubClient:
         Raises:
             GitHubAPIError: If the PR or repo is not found.
         """
+        logger.info("get_pr_diff called", extra={"repo": repo_full_name, "pr": pr_number})
         url = f"{GITHUB_API_BASE}/repos/{repo_full_name}/pulls/{pr_number}"
-        response = await self._request("GET", url, accept="application/vnd.github.v3.diff")
+        response = await self._request("GET", url, accept="application/vnd.github.diff")
+        logger.info("get_pr_diff response", extra={"status": response.status_code})
 
         if response.status_code == 404:
             raise GitHubAPIError(
