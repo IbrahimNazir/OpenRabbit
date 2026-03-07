@@ -78,3 +78,24 @@ class LLMRateLimitError(LLMError):
 
 class DiffParseError(Exception):
     """Failed to parse a unified diff into structured data."""
+
+
+# =============================================================================
+# RAG / Vector Store
+# =============================================================================
+
+
+class RAGError(Exception):
+    """Base exception for RAG/vector store failures."""
+
+
+class QdrantError(RAGError):
+    """Qdrant operation failed (collection missing, timeout, connection refused)."""
+
+
+class EmbeddingError(RAGError):
+    """OpenAI embedding API call failed or returned unexpected data."""
+
+
+class IndexingError(RAGError):
+    """Repository indexing failed or was interrupted mid-run."""

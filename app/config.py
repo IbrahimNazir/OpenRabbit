@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # --- Vector DB ---
     qdrant_url: str = "http://localhost:6333"
+    openai_api_key: str = ""  # For text-embedding-3-small (separate from LLM providers)
 
     # --- Application ---
     log_level: str = "INFO"

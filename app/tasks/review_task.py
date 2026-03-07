@@ -187,6 +187,14 @@ async def _run_async_pipeline(
     from app.core.github_client import GitHubClient
     from app.pipeline.orchestrator import run_pipeline
 
+    try:
+        from app.llm.client import LLMClient as _LLMClient
+        from app.rag.factory import create_context_builder
+        _rag_available = True
+    except ImportError:
+        _rag_available = False
+        logger.warning("qdrant_client not installed — RAG disabled. Run: poetry install")
+
     settings = get_settings()
 
     # Create async Redis connection for the GitHub client
@@ -194,6 +202,43 @@ async def _run_async_pipeline(
 
     try:
         github = GitHubClient(installation_id, redis_client)
+
+        # Phase 3: initialize RAG context builder (graceful degradation)
+        context_builder = None
+        try:
+            if not _rag_available:
+                raise ImportError("qdrant_client not installed")
+            context_builder = create_context_builder(redis_client, _LLMClient(), settings)  # type: ignore[possibly-undefined]
+            await context_builder.retriever.embedding_service.ensure_collection()
+            await context_builder.retriever.embedding_service.ensure_collection(
+                collection_name="past_findings"
+            )
+        except Exception:
+            logger.warning(
+                "RAG context builder init failed — proceeding without RAG",
+                extra={"repo": repo_full_name, "pr": pr_number},
+            )
+            context_builder = None
+
+        # Phase 3: incremental PR-time chunk indexing
+        if context_builder is not None:
+            try:
+                from app.core.diff_parser import parse_diff as _parse_diff
+                from app.rag.pr_indexer import PRIndexer
+
+                _raw_diff = await github.get_pr_diff(repo_full_name, pr_number)
+                _file_diffs = _parse_diff(_raw_diff)
+                _pr_indexer = PRIndexer(
+                    context_builder.retriever.embedding_service, github
+                )
+                await _pr_indexer.index_pr_changes(
+                    _file_diffs, repo_id, head_sha, repo_full_name
+                )
+            except Exception:
+                logger.warning(
+                    "PR incremental indexing failed — review continues",
+                    extra={"repo": repo_full_name, "pr": pr_number},
+                )
 
         # Run the pipeline
         review_result = await run_pipeline(
@@ -204,6 +249,8 @@ async def _run_async_pipeline(
             base_sha=base_sha,
             pr_title=pr_title,
             pr_description=pr_description,
+            repo_id=repo_id,
+            context_builder=context_builder,
         )
 
         # Build per-file position maps for multi-line comment support (ADR-0027).
@@ -278,6 +325,17 @@ async def _run_async_pipeline(
         except Exception:
             logger.exception("Failed to post summary comment")
 
+        # Phase 3: upsert findings to past_findings collection for future few-shot retrieval
+        if context_builder is not None and review_result.findings:
+            for finding in review_result.findings:
+                await context_builder.upsert_past_finding(
+                    repo_id=repo_id,
+                    org_id=0,  # Phase 4 will add proper org scoping
+                    finding=finding,
+                    was_applied=False,
+                    was_dismissed=False,
+                )
+
         return {
             "status": "completed",
             "findings_count": len(review_result.findings),
@@ -288,6 +346,11 @@ async def _run_async_pipeline(
         }
 
     finally:
+        if context_builder is not None:
+            try:
+                await context_builder.retriever.embedding_service.aclose()
+            except Exception:
+                pass
         await github.aclose()
         await redis_client.close()
 

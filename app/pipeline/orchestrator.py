@@ -24,7 +24,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.comment_formatter import Finding, ReviewResult
 from app.core.config_loader import ReviewConfig, load_review_config, should_ignore_file
@@ -39,6 +39,9 @@ from app.pipeline.stage_2_bugs import run_bug_detection
 from app.pipeline.stage_3_xfile import run_cross_file_analysis
 from app.pipeline.stage_4_style import run_style_review
 from app.pipeline.stage_5_synth import run_synthesis
+
+if TYPE_CHECKING:
+    from app.rag.context_builder import ContextBuilder, EnrichedContext
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +102,11 @@ class ReviewContext:
         default_factory=lambda: asyncio.Semaphore(LLM_CONCURRENCY)
     )
 
+    # Phase 3: RAG context (optional — repo_id=0 disables RAG)
+    repo_id: int = 0
+    context_builder: "ContextBuilder | None" = None
+    enriched_contexts: "dict[str, EnrichedContext]" = field(default_factory=dict)
+
     def should_run_stage_3(self) -> bool:
         """Return True if cross-file analysis should run."""
         if self.summary and self.summary.risk_level == "high":
@@ -131,6 +139,8 @@ async def run_pipeline(
     base_sha: str,
     pr_title: str = "",
     pr_description: str = "",
+    repo_id: int = 0,
+    context_builder: "ContextBuilder | None" = None,
 ) -> ReviewResult:
     """Execute the full five-stage review pipeline.
 
@@ -249,6 +259,8 @@ async def run_pipeline(
         pr_description=pr_description,
         llm=llm,
         semaphore=semaphore,
+        repo_id=repo_id,
+        context_builder=context_builder,
     )
 
     # ------------------------------------------------------------------
@@ -271,6 +283,24 @@ async def run_pipeline(
     ctx.summary = summary
     total_cost += summary.cost_usd
     stages.append("stage_1_summary")
+
+    # ------------------------------------------------------------------
+    # RAG Context Enrichment (Phase 3) — graceful degradation
+    # ------------------------------------------------------------------
+    if ctx.context_builder is not None and ctx.repo_id != 0:
+        try:
+            await asyncio.wait_for(_enrich_with_rag_context(ctx), timeout=30.0)
+            stages.append("rag_enrichment")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "RAG enrichment timed out — proceeding without context",
+                extra={"repo": repo_full_name, "pr": pr_number},
+            )
+        except Exception:
+            logger.warning(
+                "RAG enrichment failed — proceeding without context",
+                extra={"repo": repo_full_name, "pr": pr_number},
+            )
 
     # ------------------------------------------------------------------
     # Stage 2: Bug & Security Detection
@@ -334,6 +364,39 @@ async def run_pipeline(
     )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+#  RAG context enrichment helper (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+async def _enrich_with_rag_context(ctx: ReviewContext) -> None:
+    """Build RAG-enriched context for each file diff in parallel.
+
+    Populates ``ctx.enriched_contexts`` keyed by filename.
+    Any per-file failure is logged and skipped — never propagates.
+    """
+    assert ctx.context_builder is not None
+
+    async def _one(fd: FileDiff) -> tuple[str, "EnrichedContext | None"]:
+        try:
+            ec = await ctx.context_builder.build_review_context(  # type: ignore[union-attr]
+                fd, ctx.repo_id
+            )
+            return fd.filename, ec
+        except Exception:
+            logger.warning("RAG enrichment failed for %s", fd.filename)
+            return fd.filename, None
+
+    tasks = [asyncio.create_task(_one(fd)) for fd in ctx.file_diffs]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results:
+        if isinstance(r, tuple):
+            fname, ec = r
+            if ec is not None:
+                ctx.enriched_contexts[fname] = ec
 
 
 # ---------------------------------------------------------------------------

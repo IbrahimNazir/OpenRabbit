@@ -209,6 +209,17 @@ Rules:
 
 
 # =============================================================================
+#  Natural Language Change Description (RAG query construction — Phase 3)
+# =============================================================================
+
+PROMPT_DESCRIBE_CHANGE: str = (
+    "Describe in one sentence what this code change does:\n\n"
+    "```{language}\n{hunk_content}\n```\n\n"
+    "Return ONLY the one-sentence description. No JSON, no explanation."
+)
+
+
+# =============================================================================
 #  Fix This (Conversation)
 # =============================================================================
 

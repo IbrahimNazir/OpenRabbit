@@ -26,6 +26,7 @@ from app.pipeline.stage_0_linters import LinterFinding
 
 if TYPE_CHECKING:
     from app.pipeline.orchestrator import ReviewContext
+    from app.rag.context_builder import EnrichedContext
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,35 @@ async def run_bug_detection(ctx: "ReviewContext") -> list[Finding]:
 # ---------------------------------------------------------------------------
 #  Analysis helpers
 # ---------------------------------------------------------------------------
+
+
+def _format_rag_context(enriched: "EnrichedContext") -> str:
+    """Format RAG-retrieved context as a markdown section for injection into prompts."""
+    parts: list[str] = []
+
+    if enriched.relevant_chunks:
+        parts.append("## Semantically Related Code in This Repository")
+        for chunk in enriched.relevant_chunks[:3]:
+            parts.append(
+                f"**{chunk.file_path}:{chunk.start_line}–{chunk.end_line}** "
+                f"`{chunk.name}` (similarity {chunk.score:.2f}):\n"
+                f"```{chunk.language}\n{chunk.content[:400]}\n```"
+            )
+
+    if enriched.caller_chunks:
+        parts.append("## Call Sites of Changed Functions")
+        for chunk in enriched.caller_chunks[:3]:
+            parts.append(
+                f"**{chunk.file_path}:{chunk.start_line}** `{chunk.name}`:\n"
+                f"```{chunk.language}\n{chunk.content[:300]}\n```"
+            )
+
+    if enriched.past_findings:
+        parts.append("## Similar Past Findings (Few-Shot Examples)")
+        for pf in enriched.past_findings:
+            parts.append(f"- **[{pf.severity}]** {pf.title}: {pf.body[:150]}")
+
+    return "\n\n".join(parts)
 
 
 def _build_linter_context(linter_findings: list[LinterFinding]) -> str:
@@ -254,6 +284,13 @@ async def _analyze_file_level(
             if linter_context:
                 full_file_context += linter_context
 
+            # Prepend RAG context when available (Phase 3)
+            enriched = ctx.enriched_contexts.get(file_diff.filename)
+            if enriched:
+                rag_section = _format_rag_context(enriched)
+                if rag_section:
+                    full_file_context = rag_section + "\n\n---\n\n" + full_file_context
+
             prompt = PROMPT_BUG_DETECTION.format(
                 file_path=file_diff.filename,
                 language=file_diff.language or "text",
@@ -306,6 +343,15 @@ async def _analyze_hunk_level(
             summary_text = ctx.summary.summary if ctx.summary else ""
 
             full_file_context_parts: list[str] = []
+
+            # Prepend RAG context when available (Phase 3)
+            enriched = ctx.enriched_contexts.get(file_diff.filename)
+            if enriched:
+                rag_section = _format_rag_context(enriched)
+                if rag_section:
+                    full_file_context_parts.append(rag_section)
+                    full_file_context_parts.append("---")
+
             if summary_text:
                 full_file_context_parts.append(f"**PR Summary:** {summary_text}")
             if hunk.ast_function_context:

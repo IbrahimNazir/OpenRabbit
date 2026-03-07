@@ -59,22 +59,82 @@ async def run_cross_file_analysis(ctx: "ReviewContext") -> list[Finding]:
         len(changed_functions),
     )
 
-    all_findings: list[Finding] = []
+    # Phase 3: use RAG vector search for call-site discovery when available
+    if ctx.context_builder is not None and ctx.repo_id != 0:
+        all_findings = await _rag_cross_file_analysis(changed_functions, ctx)
+        logger.info("Stage 3 complete (RAG): %d cross-file findings", len(all_findings))
+        return all_findings
 
+    # Phase 2 heuristic fallback: search within the PR diff only
+    all_findings = []
     for func_name, file_diff, change_desc in changed_functions:
         call_sites = _find_call_sites(func_name, file_diff.filename, ctx.file_diffs)
         if not call_sites:
             continue
 
-        # Limit call sites sent to LLM
         call_sites = call_sites[:MAX_CALL_SITES]
-
         findings = await _analyze_impact(
             func_name, change_desc, call_sites, file_diff, ctx
         )
         all_findings.extend(findings)
 
-    logger.info("Stage 3 complete: %d cross-file findings", len(all_findings))
+    logger.info("Stage 3 complete (heuristic): %d cross-file findings", len(all_findings))
+    return all_findings
+
+
+# ---------------------------------------------------------------------------
+#  RAG-powered cross-file analysis (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+async def _rag_cross_file_analysis(
+    changed_functions: list[tuple[str, FileDiff, str]],
+    ctx: "ReviewContext",
+) -> list[Finding]:
+    """Use Qdrant vector search to find real call sites across the full codebase.
+
+    Falls back to the PR-diff heuristic for functions where the RAG query fails.
+    """
+    assert ctx.context_builder is not None
+    retriever = ctx.context_builder.retriever
+
+    all_findings: list[Finding] = []
+
+    for func_name, file_diff, change_desc in changed_functions:
+        try:
+            caller_chunks = await retriever.find_callers(
+                function_name=func_name,
+                repo_id=ctx.repo_id,
+                exclude_files=[file_diff.filename],
+            )
+        except Exception:
+            logger.warning(
+                "RAG caller lookup failed for %s — falling back to heuristic", func_name
+            )
+            # Heuristic fallback for this single function
+            call_sites = _find_call_sites(func_name, file_diff.filename, ctx.file_diffs)
+            if call_sites:
+                findings = await _analyze_impact(
+                    func_name, change_desc, call_sites[:MAX_CALL_SITES], file_diff, ctx
+                )
+                all_findings.extend(findings)
+            continue
+
+        if not caller_chunks:
+            continue
+
+        call_sites = [
+            {
+                "file": c.file_path,
+                "line": c.start_line,
+                "code": c.content[:500],
+            }
+            for c in caller_chunks[:MAX_CALL_SITES]
+        ]
+
+        findings = await _analyze_impact(func_name, change_desc, call_sites, file_diff, ctx)
+        all_findings.extend(findings)
+
     return all_findings
 
 
