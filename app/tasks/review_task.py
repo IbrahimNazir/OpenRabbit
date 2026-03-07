@@ -92,6 +92,7 @@ def run_pr_review(
                     base_sha=base_sha,
                     pr_title=pr_title,
                     pr_description=pr_description,
+                    repo_id=repo_id,
                 ),
             )
             result = future.result(timeout=300)  # 5-minute hard cap
@@ -178,6 +179,7 @@ async def _run_async_pipeline(
     base_sha: str,
     pr_title: str,
     pr_description: str,
+    repo_id: int | None = None,
 ) -> dict[str, Any]:
     """Bridge from sync Celery task to async pipeline."""
     import redis.asyncio as aioredis

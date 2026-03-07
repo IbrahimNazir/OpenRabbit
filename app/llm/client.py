@@ -23,11 +23,11 @@ import time
 from typing import Any
 
 try:
-    import google.generativeai as genai
-    from google.api_core.exceptions import ResourceExhausted
+    from google import genai as genai_sdk
+    from google.genai import types as genai_types
 except ImportError:
-    genai = None  # type: ignore
-    ResourceExhausted = None  # type: ignore
+    genai_sdk = None  # type: ignore
+    genai_types = None  # type: ignore
 
 try:
     import openai
@@ -105,10 +105,9 @@ class LLMClient:
         
         # Gemini client
         self._gemini_client = None
-        if genai and settings.gemini_api_key:
+        if genai_sdk and settings.gemini_api_key:
             try:
-                genai.configure(api_key=settings.gemini_api_key)
-                self._gemini_client = genai
+                self._gemini_client = genai_sdk.Client(api_key=settings.gemini_api_key)
                 logger.info("Gemini client initialized")
             except Exception as e:
                 logger.warning(f"Failed to initialize Gemini client: {e}")
@@ -333,20 +332,12 @@ class LLMClient:
                 if system:
                     full_prompt = f"{system}\n\n{prompt}"
 
-                # Call Gemini via sync wrapper (Gemini SDK is sync)
-                client = self._gemini_client
-                model_obj = client.GenerativeModel(model)
-
-                # Run sync call in thread pool to avoid blocking
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: model_obj.generate_content(
-                        full_prompt,
-                        generation_config={
-                            "max_output_tokens": max_tokens,
-                            "temperature": temperature,
-                        },
+                response = await self._gemini_client.aio.models.generate_content(
+                    model=model,
+                    contents=full_prompt,
+                    config=genai_types.GenerateContentConfig(
+                        max_output_tokens=max_tokens,
+                        temperature=temperature,
                     ),
                 )
 
@@ -379,9 +370,7 @@ class LLMClient:
                 last_error = e
                 # Check for specific error types
                 error_str = str(e).lower()
-                if any(x in error_str for x in ["rate_limit", "too many requests", "quota", "429"]) or (
-                    ResourceExhausted is not None and isinstance(e, ResourceExhausted)
-                ):
+                if any(x in error_str for x in ["rate_limit", "too many requests", "quota", "429"]):
                     # Fail fast — let complete() fall back to another provider immediately.
                     # Sleeping here wastes time; Celery will retry the whole task if needed.
                     logger.warning(

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     gemini_api_key: str = ""
     groq_api_key: str = ""
-    llm_provider: str = "gemini"  # Options: 'gemini', 'deepseek', 'anthropic', 'groq'
+    llm_provider: str = "groq"  # Options: 'gemini', 'deepseek', 'anthropic', 'groq'
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://openrabbit:devpassword@localhost:5432/openrabbit"
