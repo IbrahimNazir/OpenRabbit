@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
 
 from app.core.comment_formatter import Finding
@@ -54,6 +55,10 @@ async def run_bug_detection(ctx: "ReviewContext") -> list[Finding]:
     Returns:
         List of ``Finding`` objects.
     """
+    start = time.monotonic()
+    file_level_count = 0
+    hunk_level_count = 0
+
     semaphore = ctx.semaphore
     llm = ctx.llm
 
@@ -90,6 +95,7 @@ async def run_bug_detection(ctx: "ReviewContext") -> list[Finding]:
                 )
                 tasks.append(task)
                 call_count += 1
+                file_level_count += 1
         else:
             for hunk in file_diff.hunks:
                 if call_count >= MAX_LLM_CALLS:
@@ -101,6 +107,7 @@ async def run_bug_detection(ctx: "ReviewContext") -> list[Finding]:
                 )
                 tasks.append(task)
                 call_count += 1
+                hunk_level_count += 1
 
     if not tasks:
         return []
@@ -114,8 +121,14 @@ async def run_bug_detection(ctx: "ReviewContext") -> list[Finding]:
             logger.warning("Bug detection task failed: %s", r)
 
     logger.info(
-        "Stage 2 complete",
-        extra={"findings": len(findings), "llm_calls": call_count},
+        "Stage 2 bug detection completed", extra={
+            "repo": ctx.repo_full_name, "pr": ctx.pr_number,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "files_analyzed": len(ctx.file_diffs),
+            "findings": len(findings),
+            "file_level": file_level_count,
+            "hunk_level": hunk_level_count
+        }
     )
     return findings
 

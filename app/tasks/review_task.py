@@ -55,7 +55,7 @@ def run_pr_review(
     Returns:
         Dict with review status, findings count, and cost.
     """
-    start_time = time.monotonic()
+    task_start = time.monotonic()
     review_id: str | None = None
 
     logger.info(
@@ -79,6 +79,11 @@ def run_pr_review(
             base_sha=base_sha,
         )
 
+        logger.info("PRReview record created", extra={
+            "repo": repo_full_name, "pr": pr_number,
+            "review_id": review_id
+        })
+
         # Run the async pipeline in a dedicated thread with a fresh event loop.
         # This avoids deadlocks when Celery's own event loop is running in this thread.
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -98,7 +103,6 @@ def run_pr_review(
             result = future.result(timeout=300)  # 5-minute hard cap
 
         # Update DB record with results
-        duration_ms = int((time.monotonic() - start_time) * 1000)
         _update_review_record(
             review_id=review_id,
             status="completed",
@@ -106,17 +110,14 @@ def run_pr_review(
             cost_usd=result.get("cost_usd", 0.0),
         )
 
-        logger.info(
-            "Review task completed",
-            extra={
-                "task_id": self.request.id,
-                "repo": repo_full_name,
-                "pr_number": pr_number,
-                "findings": result.get("findings_count", 0),
-                "cost_usd": result.get("cost_usd", 0),
-                "duration_ms": duration_ms,
-            },
-        )
+        total_duration = int((time.monotonic() - task_start) * 1000)
+        logger.info("Review task completed", extra={
+            "repo": repo_full_name, "pr": pr_number,
+            "review_id": review_id,
+            "total_duration_ms": total_duration,
+            "findings_count": len(result.get("findings", [])),
+            "cost_usd": f"{result.get('cost_usd', 0.0):.4f}"
+        })
 
         return result
 
@@ -215,10 +216,18 @@ async def _run_async_pipeline(
             await context_builder.retriever.embedding_service.ensure_collection(
                 collection_name="past_findings"
             )
-        except Exception:
+            logger.info(
+                "RAG context builder initialized successfully",
+                extra={"repo": repo_full_name, "pr": pr_number},
+            )
+        except Exception as e:
             logger.warning(
                 "RAG context builder init failed — proceeding without RAG",
-                extra={"repo": repo_full_name, "pr": pr_number},
+                extra={
+                    "repo": repo_full_name,
+                    "pr": pr_number,
+                    "error": f"{type(e).__name__}: {str(e)[:200]}",
+                },
             )
             context_builder = None
 

@@ -48,6 +48,8 @@ dev = [
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<0.25",
     "pytest-mock>=3.14,<4",
+    "pytest-cov>=5.0,<6",
+    "aiosqlite>=0.19,<0.20",
     "ruff>=0.7,<0.8",
     "mypy>=1.11,<2",
     "black>=24.10,<25",
@@ -80,3 +82,10 @@ target-version = ["py312"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not e2e'"
+markers = [
+    "unit: Pure unit tests with no I/O or external services",
+    "integration: Tests with in-memory services (Qdrant, SQLite, Redis)",
+    "e2e: End-to-end tests requiring Docker services (PostgreSQL, Redis, Qdrant)",
+    "slow: Tests that take more than 5 seconds",
+]

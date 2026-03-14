@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -168,6 +169,7 @@ async def run_pipeline(
         "Pipeline starting",
         extra={"repo": repo_full_name, "pr": pr_number},
     )
+    start_time = time.monotonic()
     try:
         raw_diff = await github_client.get_pr_diff(repo_full_name, pr_number)
     except Exception:
@@ -240,6 +242,11 @@ async def run_pipeline(
     await _enrich_hunks_with_ast_context(
         github_client, repo_full_name, head_sha, reviewable_diffs
     )
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+    logger.info("AST enrichment completed", extra={
+        "repo": repo_full_name, "pr": pr_number,
+        "duration_ms": duration_ms, "files_enriched": len(reviewable_diffs)
+    })
     stages.append("ast_enrichment")
 
     # ------------------------------------------------------------------
@@ -269,6 +276,14 @@ async def run_pipeline(
     linter_findings_by_file = await _run_stage_0(ctx)
     ctx.linter_findings_by_file = linter_findings_by_file
     ctx.linter_findings = [lf for lfs in linter_findings_by_file.values() for lf in lfs]
+    stage_0_time = time.monotonic()
+    linter_findings_total = sum(len(lfs) for lfs in linter_findings_by_file.values())
+    logger.info("Stage 0 linters completed", extra={
+        "repo": repo_full_name, "pr": pr_number,
+        "duration_ms": int((stage_0_time - start_time) * 1000),
+        "files_linted": len(reviewable_diffs),
+        "findings_count": linter_findings_total
+    })
     stages.append("stage_0_linters")
 
     # ------------------------------------------------------------------
@@ -282,14 +297,28 @@ async def run_pipeline(
     )
     ctx.summary = summary
     total_cost += summary.cost_usd
+    stage_1_time = time.monotonic()
+    logger.info("Stage 1 summary completed", extra={
+        "repo": repo_full_name, "pr": pr_number,
+        "duration_ms": int((stage_1_time - stage_0_time) * 1000),
+        "risk_level": summary.risk_level,
+        "cost_usd": f"{summary.cost_usd:.4f}"
+    })
     stages.append("stage_1_summary")
 
     # ------------------------------------------------------------------
     # RAG Context Enrichment (Phase 3) — graceful degradation
     # ------------------------------------------------------------------
+    rag_time = None
     if ctx.context_builder is not None and ctx.repo_id != 0:
         try:
             await asyncio.wait_for(_enrich_with_rag_context(ctx), timeout=30.0)
+            rag_time = time.monotonic()
+            logger.info("RAG enrichment completed", extra={
+                "repo": repo_full_name, "pr": pr_number,
+                "duration_ms": int((rag_time - stage_1_time) * 1000),
+                "files_enriched": len(ctx.enriched_contexts)
+            })
             stages.append("rag_enrichment")
         except asyncio.TimeoutError:
             logger.warning(
@@ -307,7 +336,11 @@ async def run_pipeline(
     # ------------------------------------------------------------------
     async def _run_stage_3_wrapper() -> list[Finding]:
         if ctx.should_run_stage_3():
-            logger.info("Stage 3 triggered (risk=%s)", summary.risk_level)
+            logger.info("Stage 3 triggered", extra={
+                "repo": ctx.repo_full_name, "pr": ctx.pr_number,
+                "reason": "high_risk" if summary.risk_level == "high" else "signature_change",
+                "risk_level": summary.risk_level
+            })
             return await run_cross_file_analysis(ctx)
         logger.debug("Stage 3 skipped")
         return []
@@ -338,6 +371,16 @@ async def run_pipeline(
     else:
         logger.exception("Stage 4 failed", exc_info=parallel_results[2] if isinstance(parallel_results[2], BaseException) else None)
 
+    parallel_time = time.monotonic()
+    bug_duration = int((parallel_time - (rag_time or stage_1_time)) * 1000)
+    logger.info("Stages 2-4 parallel completed", extra={
+        "repo": repo_full_name, "pr": pr_number,
+        "duration_ms": bug_duration,
+        "stage_2_findings": len(bug_findings),
+        "stage_3_findings": len(xfile_findings),
+        "stage_4_findings": len(style_findings)
+    })
+
     # ------------------------------------------------------------------
     # Stage 5: Synthesis & Deduplication
     # ------------------------------------------------------------------
@@ -348,6 +391,14 @@ async def run_pipeline(
 
     all_raw = linter_as_findings + bug_findings + xfile_findings + style_findings
     final_findings = await run_synthesis(all_raw, ctx)
+    stage_5_time = time.monotonic()
+    all_raw_count = len(all_raw)
+    logger.info("Stage 5 synthesis completed", extra={
+        "repo": repo_full_name, "pr": pr_number,
+        "duration_ms": int((stage_5_time - parallel_time) * 1000),
+        "input_findings": all_raw_count,
+        "output_findings": len(final_findings)
+    })
     stages.append("stage_5_synthesis")
 
     # ------------------------------------------------------------------

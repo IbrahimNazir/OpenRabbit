@@ -104,6 +104,9 @@ class ContextBuilder:
             ``EnrichedContext`` populated with retrieved chunks and past findings.
             Never raises — any failure returns an empty EnrichedContext.
         """
+        import time
+        start = time.monotonic()
+
         ctx = EnrichedContext(file_diff=file_diff)
         if repo_id == 0:
             return ctx
@@ -117,6 +120,12 @@ class ContextBuilder:
             repo_id=repo_id,
             exclude_files=[file_diff.filename],
         )
+
+        logger.debug("Relevant chunks found", extra={
+            "file": file_diff.filename,
+            "chunks": len(ctx.relevant_chunks),
+            "top_score": ctx.relevant_chunks[0].score if ctx.relevant_chunks else 0
+        })
 
         # 3. Find callers of changed functions (de-duplicated by chunk_id)
         changed_func_names = _extract_changed_function_names(file_diff)
@@ -132,13 +141,34 @@ class ContextBuilder:
                     seen_chunk_ids.add(c.chunk_id)
                     ctx.caller_chunks.append(c)
 
+        logger.debug("Callers found", extra={
+            "file": file_diff.filename,
+            "callers": len(ctx.caller_chunks)
+        })
+
         # 4. Similar past findings (few-shot)
         ctx.past_findings = await self._find_past_findings(file_diff, repo_id)
+
+        logger.debug("Past findings retrieved", extra={
+            "file": file_diff.filename,
+            "findings": len(ctx.past_findings)
+        })
 
         # 5. Trim to token budget
         ctx.relevant_chunks, ctx.total_tokens = _trim_to_token_budget(
             ctx.relevant_chunks, MAX_CONTEXT_TOKENS
         )
+
+        logger.debug("Review context built", extra={
+            "file": file_diff.filename,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "tokens_used": ctx.total_tokens,
+            "components": {
+                "relevant_chunks": len(ctx.relevant_chunks),
+                "caller_chunks": len(ctx.caller_chunks),
+                "past_findings": len(ctx.past_findings)
+            }
+        })
 
         return ctx
 

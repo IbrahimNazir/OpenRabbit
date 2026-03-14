@@ -41,7 +41,7 @@ def index_repository_task(
     Returns:
         Dict with indexing status and chunk count.
     """
-    start_time = time.monotonic()
+    task_start = time.monotonic()
 
     logger.info(
         "Index task started",
@@ -65,14 +65,15 @@ def index_repository_task(
             )
             result = future.result(timeout=1800)  # 30-minute hard cap for large repos
 
-        duration_ms = int((time.monotonic() - start_time) * 1000)
+        total_duration = int((time.monotonic() - task_start) * 1000)
         logger.info(
-            "Index task completed",
+            "Indexing task completed",
             extra={
-                "task_id": self.request.id,
                 "repo": repo_full_name,
-                "chunks_indexed": result.get("chunks_indexed", 0),
-                "duration_ms": duration_ms,
+                "total_duration_ms": total_duration,
+                "files_indexed": result.get("files_indexed", 0),
+                "chunks_total": result.get("chunks_indexed", 0),
+                "status": result.get("status", "unknown")
             },
         )
         return result
@@ -201,7 +202,7 @@ async def _post_indexing_complete_comment(
             "- Semantically related code retrieved from the full repository\n"
             "- Call sites of changed functions identified automatically\n"
             "- Similar past findings shown as few-shot examples\n\n"
-            "_This message was posted automatically after initial indexing._"
+            "- This message was posted automatically after initial indexing._"
         )
         await github.post_review_comment(
             repo_full_name=repo_full_name,

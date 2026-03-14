@@ -170,7 +170,8 @@ class RepositoryIndexer:
         call_timestamps: list[float] = []
         pending_files = code_files[resume_index:]
 
-        for batch_start in range(0, len(pending_files), FILE_BATCH_SIZE):
+        for batch_idx, batch_start in enumerate(range(0, len(pending_files), FILE_BATCH_SIZE)):
+            batch_time_start = time.monotonic()
             batch = pending_files[batch_start : batch_start + FILE_BATCH_SIZE]
 
             # Rate limit: enforce max GITHUB_CALLS_PER_MINUTE
@@ -197,12 +198,15 @@ class RepositoryIndexer:
             progress.last_processed_index = resume_index + batch_start + len(batch)
             await self._save_progress(progress_key, progress)
 
-            logger.info(
-                "Indexing progress: %d/%d files (repo_id=%d)",
-                progress.done,
-                progress.total,
-                repo_id,
-            )
+            batch_duration = int((time.monotonic() - batch_time_start) * 1000)
+            logger.info("Indexing batch completed", extra={
+                "repo": repo_full_name,
+                "batch": batch_idx + 1,
+                "files": len(batch),
+                "duration_ms": batch_duration,
+                "chunks_total": progress.chunks_total,
+                "progress_pct": int(progress.done / progress.total * 100) if progress.total > 0 else 0
+            })
 
         progress.status = "completed"
         await self._save_progress(progress_key, progress)

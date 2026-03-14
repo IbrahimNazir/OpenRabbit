@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
 
 from app.core.comment_formatter import Finding
@@ -49,6 +50,7 @@ async def run_cross_file_analysis(ctx: "ReviewContext") -> list[Finding]:
     Returns:
         List of ``Finding`` objects with category='breaking-change'.
     """
+    start = time.monotonic()
     changed_functions = _extract_changed_functions(ctx.file_diffs)
     if not changed_functions:
         logger.debug("Stage 3: no changed function signatures detected")
@@ -62,7 +64,12 @@ async def run_cross_file_analysis(ctx: "ReviewContext") -> list[Finding]:
     # Phase 3: use RAG vector search for call-site discovery when available
     if ctx.context_builder is not None and ctx.repo_id != 0:
         all_findings = await _rag_cross_file_analysis(changed_functions, ctx)
-        logger.info("Stage 3 complete (RAG): %d cross-file findings", len(all_findings))
+        logger.info("Stage 3 cross-file impact completed", extra={
+            "repo": ctx.repo_full_name, "pr": ctx.pr_number,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "findings": len(all_findings),
+            "functions_analyzed": len(changed_functions)
+        })
         return all_findings
 
     # Phase 2 heuristic fallback: search within the PR diff only
@@ -78,7 +85,12 @@ async def run_cross_file_analysis(ctx: "ReviewContext") -> list[Finding]:
         )
         all_findings.extend(findings)
 
-    logger.info("Stage 3 complete (heuristic): %d cross-file findings", len(all_findings))
+    logger.info("Stage 3 cross-file impact completed", extra={
+        "repo": ctx.repo_full_name, "pr": ctx.pr_number,
+        "duration_ms": int((time.monotonic() - start) * 1000),
+        "findings": len(all_findings),
+        "functions_analyzed": len(changed_functions)
+    })
     return all_findings
 
 
@@ -107,6 +119,9 @@ async def _rag_cross_file_analysis(
                 repo_id=ctx.repo_id,
                 exclude_files=[file_diff.filename],
             )
+            logger.debug("Found callers for function", extra={
+                "function": func_name, "callers_found": len(caller_chunks)
+            })
         except Exception:
             logger.warning(
                 "RAG caller lookup failed for %s — falling back to heuristic", func_name

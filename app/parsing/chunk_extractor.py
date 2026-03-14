@@ -96,6 +96,10 @@ def extract_chunks(file_content: str, file_path: str) -> list[CodeChunk]:
     Returns:
         List of ``CodeChunk`` objects, deduplicated by chunk_id.
     """
+    import time
+    start = time.monotonic()
+    strategy_used = "unknown"
+
     if not file_content or not file_content.strip():
         return []
 
@@ -122,12 +126,14 @@ def extract_chunks(file_content: str, file_path: str) -> list[CodeChunk]:
     # Try Tier 1 — semantic chunking via Tree-sitter
     tree = _parser.parse_file(file_content, language)
     if tree is not None:
+        strategy_used = "semantic"
         semantic_chunks = _extract_semantic_chunks(
             tree, file_content, lines, file_path, language
         )
         chunks.extend(semantic_chunks)
     else:
         # Tier 2 — sliding-window fallback
+        strategy_used = "sliding_window"
         window_chunks = _extract_sliding_window(lines, file_path, language)
         chunks.extend(window_chunks)
 
@@ -138,6 +144,14 @@ def extract_chunks(file_content: str, file_path: str) -> list[CodeChunk]:
         if chunk.chunk_id not in seen:
             seen.add(chunk.chunk_id)
             unique.append(chunk)
+
+    logger.debug("Chunks extracted", extra={
+        "file": file_path,
+        "language": language,
+        "strategy": strategy_used,
+        "chunks": len(unique),
+        "duration_ms": int((time.monotonic() - start) * 1000)
+    })
 
     return unique
 

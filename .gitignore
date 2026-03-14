@@ -7,6 +7,7 @@ private-key.pem
 __pycache__/
 *.py[cod]
 *$py.class
+scripts/
 *.so
 *.egg-info/
 dist/
@@ -44,3 +45,5 @@ docker-compose.override.yml
 # Github Private Key
 openrabbit-ibrahimnazir.2026-02-27.private-key.pem
 node_modules/
+E2E_TEST_READY.txt
+LOGGING_VERIFICATION_GUIDE.md

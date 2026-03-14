@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from app.core.comment_formatter import Finding
@@ -57,22 +58,33 @@ async def run_synthesis(
     Returns:
         Deduplicated, sorted findings list.
     """
+    start = time.monotonic()
+    input_count = len(all_findings)
+
     if not all_findings:
         return []
 
     logger.info("Stage 5: starting with %d raw findings", len(all_findings))
 
     # Step 1: Rule-based dedup
-    findings = _rule_based_dedup(all_findings, ctx)
+    after_rule_dedup = _rule_based_dedup(all_findings, ctx)
 
-    logger.info(
-        "Stage 5: %d findings after rule-based dedup", len(findings)
-    )
+    rule_based_output = len(after_rule_dedup)
+    logger.debug("Rule-based deduplication complete", extra={
+        "input": input_count,
+        "output": rule_based_output,
+        "removed": input_count - rule_based_output
+    })
 
     # Step 2: LLM dedup (only if many findings remain)
+    findings = after_rule_dedup
     if len(findings) > LLM_DEDUP_THRESHOLD:
-        findings = await _llm_dedup(findings, ctx)
-        logger.info("Stage 5: %d findings after LLM dedup", len(findings))
+        after_llm_dedup = await _llm_dedup(findings, ctx)
+        logger.debug("LLM deduplication triggered", extra={
+            "input": len(after_rule_dedup),
+            "output": len(after_llm_dedup)
+        })
+        findings = after_llm_dedup
 
     # Final sort
     findings.sort(
@@ -83,8 +95,15 @@ async def run_synthesis(
         )
     )
 
-    logger.info("Stage 5 complete: %d final findings", len(findings))
-    return findings
+    final_findings = findings
+    logger.info("Stage 5 synthesis complete", extra={
+        "repo": ctx.repo_full_name, "pr": ctx.pr_number,
+        "duration_ms": int((time.monotonic() - start) * 1000),
+        "input_findings": input_count,
+        "output_findings": len(final_findings),
+        "capped": len(final_findings) >= 25
+    })
+    return final_findings
 
 
 # ---------------------------------------------------------------------------

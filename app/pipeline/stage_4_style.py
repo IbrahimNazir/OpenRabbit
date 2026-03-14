@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import TYPE_CHECKING
 
 from app.core.comment_formatter import Finding
@@ -48,6 +49,10 @@ async def run_style_review(
     Returns:
         List of style ``Finding`` objects.
     """
+    start = time.monotonic()
+    hunk_count = 0
+    skipped_test_files = 0
+
     if not ctx.config.style_review:
         logger.info("Stage 4: skipped (review.style=false in config)")
         return []
@@ -58,11 +63,13 @@ async def run_style_review(
     for file_diff in ctx.file_diffs:
         if _TEST_FILE_PATTERN.search(file_diff.filename):
             logger.debug("Stage 4: skipping test file %s", file_diff.filename)
+            skipped_test_files += 1
             continue
 
         position_map = build_line_to_position_map(file_diff)
 
         for hunk in file_diff.hunks:
+            hunk_count += 1
             task = asyncio.create_task(
                 _analyze_hunk_style(
                     file_diff, hunk, position_map, ctx, semaphore
@@ -81,7 +88,13 @@ async def run_style_review(
         elif isinstance(r, Exception):
             logger.warning("Style review task failed: %s", r)
 
-    logger.info("Stage 4 complete: %d style findings", len(findings))
+    logger.info("Stage 4 style review completed", extra={
+        "repo": ctx.repo_full_name, "pr": ctx.pr_number,
+        "duration_ms": int((time.monotonic() - start) * 1000),
+        "hunks_reviewed": hunk_count,
+        "test_files_skipped": skipped_test_files,
+        "findings": len(findings)
+    })
     return findings
 
 

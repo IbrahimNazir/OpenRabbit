@@ -208,9 +208,16 @@ class TreeSitterParser:
         """
         parser = self.get_parser(language)
         if parser is None:
+            logger.debug("Tree-sitter parser not available", extra={"language": language})
             return None
         try:
-            return parser.parse(source_code.encode("utf-8", errors="replace"))
+            tree = parser.parse(source_code.encode("utf-8", errors="replace"))
+            logger.debug("Tree-sitter parse successful", extra={
+                "language": language,
+                "source_len": len(source_code),
+                "nodes": tree.root_node.child_count if tree else 0
+            })
+            return tree
         except Exception as exc:
             logger.warning("Tree-sitter parse failed for %s: %s", language, exc)
             return None
@@ -241,6 +248,11 @@ class TreeSitterParser:
 
         results: list[dict[str, Any]] = []
         self._walk_for_types(tree.root_node, target_types, source_code, results)
+        logger.debug("Function nodes extracted", extra={
+            "language": language,
+            "nodes_found": len(results),
+            "node_types": list(set(n.get("node_type") for n in results))
+        })
         return results
 
     def _walk_for_types(
@@ -311,7 +323,12 @@ class TreeSitterParser:
         if not target_types:
             return None
 
-        return self._find_innermost(tree.root_node, zero_line, target_types, source_code)
+        best = self._find_innermost(tree.root_node, zero_line, target_types, source_code)
+        if best:
+            logger.debug("Found enclosing function", extra={
+                "language": language, "line": line_number, "function": best
+            })
+        return best
 
     def _find_innermost(
         self,
@@ -358,6 +375,10 @@ class TreeSitterParser:
 
         imports: list[str] = []
         self._collect_imports(tree.root_node, import_types, source_code, imports)
+        logger.debug("Imports extracted", extra={
+            "language": language,
+            "imports_found": len(imports)
+        })
         return imports
 
     def _collect_imports(
@@ -378,7 +399,10 @@ class TreeSitterParser:
 
     def has_syntax_errors(self, tree: Any) -> bool:
         """Return True if the tree contains any ERROR nodes."""
-        return self._find_error(tree.root_node)
+        has_errors = self._find_error(tree.root_node)
+        if has_errors:
+            logger.debug("Syntax errors detected", extra={"language": "unknown"})
+        return has_errors
 
     def _find_error(self, node: Any) -> bool:
         if node.type == "ERROR" or node.is_missing:

@@ -59,6 +59,11 @@ class ContextRetriever:
     def __init__(self, embedding_service: EmbeddingService) -> None:
         self._embedder = embedding_service
 
+    @property
+    def embedding_service(self) -> EmbeddingService:
+        """Access the embedding service (for RAG initialization checks)."""
+        return self._embedder
+
     async def find_relevant_context(
         self,
         query: str,
@@ -116,6 +121,13 @@ class ContextRetriever:
                 results.append(_payload_to_chunk(hit.payload, hit.score))
                 if len(results) >= top_k:
                     break
+
+            logger.debug("Semantic search completed", extra={
+                "query_len": len(query),
+                "results": len(results),
+                "top_score": results[0].score if results else 0,
+                "threshold": SCORE_THRESHOLD
+            })
 
             return results
 
@@ -185,6 +197,12 @@ class ContextRetriever:
 
             # Sort by start_line for readability
             results.sort(key=lambda c: (c.file_path, c.start_line))
+
+            logger.debug("Caller search completed", extra={
+                "function_name": function_name,
+                "callers_found": len(results)
+            })
+
             return results[:MAX_CALLERS]
 
         except Exception:
